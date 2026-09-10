@@ -139,15 +139,23 @@ async def move_member_to_channel(guild: discord.Guild, user_id: int, channel: di
     voice channel somewhere in the guild - it cannot force someone who is
     not in voice at all to join one. Make sure players hop into any voice
     channel before the queue pops.
+
+    Returns (success: bool, reason: str | None) - the reason is only set on
+    failure, so callers can surface exactly why a drag didn't happen instead
+    of a generic silent failure.
     """
     member = guild.get_member(user_id)
-    if member is None or member.voice is None or member.voice.channel is None:
-        return False
+    if member is None:
+        return False, "that user isn't in the bot's member cache for this server"
+    if member.voice is None or member.voice.channel is None:
+        return False, "the bot doesn't see them connected to any voice channel right now"
     try:
         await member.move_to(channel)
-        return True
-    except discord.HTTPException:
-        return False
+        return True, None
+    except discord.Forbidden:
+        return False, "the bot is missing Move Members permission for that channel"
+    except discord.HTTPException as e:
+        return False, f"Discord API error ({e.status}): {e.text}"
 
 
 async def set_spectator_mute(guild: discord.Guild, user_id: int, muted: bool = True):
