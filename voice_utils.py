@@ -17,15 +17,23 @@ async def create_session_category(guild: discord.Guild, session_id: int, mode: s
 
 
 async def create_team_voice_channel(guild, category, club_name, member_ids, captain_ids):
-    """Locked to TEAM_SIZE. Members + all captains can connect; everyone else can view but not join."""
+    """Locked to TEAM_SIZE. Regular members can connect but are still subject
+    to that cap like anyone else. Captains get Move Members too, not just
+    Connect - Discord's own voice channel user-limit specifically exempts
+    anyone with Move Members on that channel, so this is what actually lets
+    a captain join a "full" VC (their own team's or any other team's)."""
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, mute_members=True),
     }
-    for uid in set(member_ids) | set(captain_ids):
+    for uid in member_ids:
         member = guild.get_member(uid)
         if member:
             overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True)
+    for uid in captain_ids:
+        member = guild.get_member(uid)
+        if member:
+            overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True)
 
     channel = await guild.create_voice_channel(
         name=club_name,
@@ -37,7 +45,9 @@ async def create_team_voice_channel(guild, category, club_name, member_ids, capt
 
 
 async def create_bench_channel(guild, category, captain_ids, bench_limit=None):
-    """Bench: visible + joinable by anyone in the session; captains included explicitly.
+    """Bench: visible + joinable by anyone in the session, subject to the
+    normal cap. Captains additionally get Move Members so they can always
+    get in even if it's already full, same reasoning as team channels.
     bench_limit lets a force-started session open up extra bench seats to
     cover the players who weren't in the initial pop (see session_cog.py)."""
     if bench_limit is None:
@@ -46,6 +56,10 @@ async def create_bench_channel(guild, category, captain_ids, bench_limit=None):
         guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, mute_members=True),
     }
+    for uid in captain_ids:
+        member = guild.get_member(uid)
+        if member:
+            overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True)
     channel = await guild.create_voice_channel(
         name=config.BENCH_CHANNEL_NAME,
         category=category,
