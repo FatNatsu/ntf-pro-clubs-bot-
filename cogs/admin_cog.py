@@ -175,15 +175,26 @@ class AdminCog(commands.Cog):
 
         state = session_cog.active_sessions.get(session_id)
         if state:
+            # Always land the real tester on the Bench, regardless of where
+            # the draft put them - as an admin you don't need to be on any
+            # specific team to report match results, and starting on the
+            # Bench is the only way to actually test the sub flow solo.
+            assigned_team_id = None
             for team_id, info in state["teams"].items():
                 if real_id in info["on_field"]:
-                    await interaction.followup.send(
-                        f"📍 You were drafted onto **{info['club_name']}**. To test the sub flow, join the Bench "
-                        f"VC and click **a different team's** Add Sub button — not {info['club_name']}'s, "
-                        f"since you're already registered there.",
-                        ephemeral=True,
-                    )
+                    assigned_team_id = team_id
                     break
+
+            if assigned_team_id is not None:
+                state["teams"][assigned_team_id]["on_field"].discard(real_id)
+                db.set_member_role(assigned_team_id, real_id, "sub")
+                bench_channel = guild.get_channel(state["bench_channel_id"])
+                await voice_utils.move_member_to_channel(guild, real_id, bench_channel)
+                await interaction.followup.send(
+                    f"🪑 You've been moved to the Bench so you can test the sub flow solo — "
+                    f"click **any team's** Add Sub button to pull yourself onto that team.",
+                    ephemeral=True,
+                )
 
 
 async def setup(bot):
