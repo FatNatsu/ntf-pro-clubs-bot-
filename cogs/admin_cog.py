@@ -131,7 +131,8 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="debug_test_session", description="[Admin] TEST ONLY: start a session filled with fake players so you can test solo")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def debug_test_session(self, interaction: discord.Interaction, mode: Literal["rivals", "league"]):
+    async def debug_test_session(self, interaction: discord.Interaction, mode: Literal["rivals", "league"],
+                                  second_tester: discord.Member = None, make_second_tester_captain: bool = False):
         guild = interaction.guild
         guild_id = guild.id
         cap = config.QUEUE_CAP[mode]
@@ -144,31 +145,61 @@ class AdminCog(commands.Cog):
             )
             return
 
-        # You fill one real seat; everything else is a synthetic test account
-        # (negative IDs, guaranteed never to collide with a real Discord
-        # snowflake) so the team-draft/round/MMR/close flow can run without
-        # needing a full queue of real people.
+        if second_tester and (second_tester.voice is None or second_tester.voice.channel is None):
+            await interaction.response.send_message(
+                f"{second_tester.mention} needs to join a voice channel first too, or they won't get dragged "
+                f"into their team's VC.",
+                ephemeral=True,
+            )
+            return
+
+        # You fill one real seat; a second real account can optionally fill
+        # another (useful for testing things that need two real Discord
+        # users, like "captains can join any team's VC but regular players
+        # can't move themselves"). Everything else is a synthetic test
+        # account (negative IDs, guaranteed never to collide with a real
+        # Discord snowflake) so the team-draft/round/MMR/close flow can run
+        # without needing a full queue of real people.
         real_id = interaction.user.id
         db.ensure_player(guild_id, real_id, interaction.user.display_name)
 
-        fake_ids = list(range(-1, -cap, -1))  # -1, -2, ... -(cap-1)
+        real_ids = [real_id]
+        if second_tester:
+            db.ensure_player(guild_id, second_tester.id, second_tester.display_name)
+            real_ids.append(second_tester.id)
+
+        fake_count = cap - len(real_ids)
+        fake_ids = list(range(-1, -(fake_count + 1), -1))  # -1, -2, ... -fake_count
         for i, fid in enumerate(fake_ids, start=1):
             db.ensure_player(guild_id, fid, f"🤖 Test Bot {i}")
 
-        players = [db.get_player(guild_id, pid) for pid in [real_id] + fake_ids]
+        players = [db.get_player(guild_id, pid) for pid in real_ids + fake_ids]
         players = [p for p in players if p]
+
+        # Force the second tester to be treated as captain-eligible for the
+        # draft - this is an in-memory-only override on the player dict
+        # passed into team_balance, it does NOT touch their persistent
+        # captain-whitelist flag in the database.
+        if second_tester and make_second_tester_captain:
+            for p in players:
+                if p["discord_id"] == second_tester.id:
+                    p["is_captain"] = 1
+                    break
 
         session_cog = self.bot.get_cog("SessionCog")
         if not session_cog:
             await interaction.response.send_message("Session cog isn't loaded — can't start a test session.", ephemeral=True)
             return
 
+        second_note = ""
+        if second_tester:
+            role_note = " (forced as a captain candidate)" if make_second_tester_captain else ""
+            second_note = f" and {second_tester.mention}{role_note}"
+
         await interaction.response.send_message(
-            f"🧪 Starting a **test {mode}** session — you + {len(fake_ids)} fake test bots ({len(players)} total). "
-            f"As an admin you can report results for **either side** of every match yourself, so you can play "
-            f"through the whole thing solo. Fake players will show as broken mentions — that's expected. "
-            f"Note: this won't fully test the sub/Bench flow with fake accounts, since they can't actually sit "
-            f"in a voice channel.",
+            f"🧪 Starting a **test {mode}** session — you{second_note} + {len(fake_ids)} fake test bots "
+            f"({len(players)} total). As an admin you can report results for **either side** of every match "
+            f"yourself. Fake players will show as broken mentions — that's expected.",
             ephemeral=True,
         )
         session_id = await session_cog.start_session(guild, mode, players, interaction.channel_id)
