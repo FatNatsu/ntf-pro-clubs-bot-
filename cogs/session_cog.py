@@ -476,6 +476,9 @@ class SessionCog(commands.Cog):
         state = self.active_sessions[session_id]
         wins_by_team = {tid: 0 for tid in state["teams"]}
         losses_by_team = {tid: 0 for tid in state["teams"]}
+        goals_for = {tid: 0 for tid in state["teams"]}
+        goals_against = {tid: 0 for tid in state["teams"]}
+
         for m in all_matches:
             winner = m["winner_team_id"]
             if winner not in wins_by_team:
@@ -485,15 +488,41 @@ class SessionCog(commands.Cog):
             if loser in losses_by_team:
                 losses_by_team[loser] += 1
 
-        ranking = sorted(wins_by_team.items(), key=lambda kv: -kv[1])
+            score_a, score_b = m["score_a"], m["score_b"]
+            if score_a is not None and score_b is not None:
+                if m["team_a_id"] in goals_for:
+                    goals_for[m["team_a_id"]] += score_a
+                    goals_against[m["team_a_id"]] += score_b
+                if m["team_b_id"] in goals_for:
+                    goals_for[m["team_b_id"]] += score_b
+                    goals_against[m["team_b_id"]] += score_a
+
+        # Ranked by wins, then fewer losses, then goal differential - GD is
+        # what actually separates teams tied on wins/losses since everyone
+        # in a round robin plays the same number of games.
+        team_ids_ranked = sorted(
+            state["teams"].keys(),
+            key=lambda tid: (
+                -wins_by_team[tid],
+                losses_by_team[tid],
+                -(goals_for[tid] - goals_against[tid]),
+            ),
+        )
+
         medals = ["🥇", "🥈", "🥉", "4️⃣"]
         lines = []
-        for i, (team_id, wins) in enumerate(ranking):
+        for i, team_id in enumerate(team_ids_ranked):
             club = state["teams"][team_id]["club_name"]
             captain = state["teams"][team_id]["captain_id"]
+            wins = wins_by_team[team_id]
             losses = losses_by_team[team_id]
+            gd = goals_for[team_id] - goals_against[team_id]
+            gd_text = f"+{gd}" if gd > 0 else str(gd)
             medal = medals[i] if i < len(medals) else f"{i + 1}."
-            lines.append(f"{medal} **{club}** — {wins}W-{losses}L — Captain <@{captain}>")
+            lines.append(
+                f"{medal} **{club}** — {wins}W-{losses}L — GD {gd_text} "
+                f"({goals_for[team_id]}-{goals_against[team_id]}) — Captain <@{captain}>"
+            )
 
         old_pr = state.get("progress_round_message")
         if old_pr and old_pr["message"]:
