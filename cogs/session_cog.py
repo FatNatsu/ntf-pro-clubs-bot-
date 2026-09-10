@@ -167,12 +167,12 @@ class SpectateView(discord.ui.View):
                 return
             channel = interaction.guild.get_channel(state["teams"][team_id]["voice_channel_id"])
             await voice_utils.allow_member_in_channel(channel, member, connect=True)
-            moved = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
+            moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
             if moved:
                 await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
                 await interaction.response.send_message(f"You're now spectating {club_name} (muted).", ephemeral=True)
             else:
-                await interaction.response.send_message("Couldn't move you — try again.", ephemeral=True)
+                await interaction.response.send_message(f"Couldn't move you — {reason}.", ephemeral=True)
         return callback
 
 
@@ -607,7 +607,11 @@ class SessionCog(commands.Cog):
                 )
                 return
 
-            incoming = random.choice(candidates)
+            # Give the requesting team the highest-MMR player currently
+            # available on the Bench, rather than a random pick - subs
+            # should reinforce with the best available player, not a
+            # coin-flip, since MMR is how the whole system judges quality.
+            incoming = max(candidates, key=lambda m: (db.get_player(state["guild_id"], m.id) or {"mmr": 0})["mmr"])
             team_channel = guild.get_channel(state["teams"][team_id]["voice_channel_id"])
 
             # If they're currently active on a DIFFERENT team, transfer them
@@ -638,7 +642,7 @@ class SessionCog(commands.Cog):
                 pass
 
             await voice_utils.allow_member_in_channel(team_channel, incoming, connect=True)
-            moved = await voice_utils.move_member_to_channel(guild, incoming.id, team_channel)
+            moved, move_fail_reason = await voice_utils.move_member_to_channel(guild, incoming.id, team_channel)
 
             state["teams"][team_id]["on_field"].add(incoming.id)
             db.add_team_member(team_id, incoming.id, "player")
@@ -650,7 +654,9 @@ class SessionCog(commands.Cog):
             await interaction.followup.send(f"<@{incoming.id}> has been moved onto {club_name}.", ephemeral=True)
         else:
             await interaction.followup.send(
-                f"<@{incoming.id}> has been added to {club_name}, but they weren't in voice so I couldn't drag them — ask them to rejoin the Bench VC.",
+                f"<@{incoming.id}> has been added to {club_name}'s roster, but I couldn't physically drag "
+                f"them there: **{move_fail_reason}**. Ask them to rejoin the Bench VC and try again, or move "
+                f"them manually.",
                 ephemeral=True,
             )
 
