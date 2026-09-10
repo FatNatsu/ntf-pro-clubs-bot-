@@ -478,6 +478,19 @@ def get_all_known_club_names(guild_id):
         return [r["club_name"] for r in rows]
 
 
+def clear_test_players(guild_id: int):
+    """Removes every synthetic test-bot account (negative discord_id, from
+    /debug_test_session) for this guild, along with their match history rows.
+    Returns how many player rows were deleted. Never touches real players
+    (positive Discord snowflakes) or real match/club history."""
+    with get_conn() as conn:
+        cur = conn.execute("SELECT COUNT(*) AS c FROM players WHERE guild_id=? AND discord_id < 0", (guild_id,))
+        count = cur.fetchone()["c"]
+        conn.execute("DELETE FROM match_participants WHERE guild_id=? AND player_id < 0", (guild_id,))
+        conn.execute("DELETE FROM players WHERE guild_id=? AND discord_id < 0", (guild_id,))
+        return count
+
+
 # ---------------------------------------------------------------------------
 # Per-guild permanent channel config (in-progress / leaderboard)
 # ---------------------------------------------------------------------------
