@@ -115,6 +115,20 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(f"Set {member.mention}'s MMR to {mmr}.", ephemeral=True)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
 
+    @app_commands.command(name="debug_clear_test_data", description="[Admin] TEST ONLY: remove fake test-bot accounts from the leaderboard")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def debug_clear_test_data(self, interaction: discord.Interaction):
+        removed = db.clear_test_players(interaction.guild_id)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+        await interaction.response.send_message(
+            f"🧹 Removed {removed} fake test-bot account(s) from this server's leaderboard. "
+            f"Real players were untouched.\n\n"
+            f"Note: club win/loss records (`/club_stats`) may still include results from test "
+            f"sessions, since those are tracked by club name rather than by player — worth "
+            f"keeping in mind if you ran tests against your real club pool.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="debug_test_session", description="[Admin] TEST ONLY: start a session filled with fake players so you can test solo")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def debug_test_session(self, interaction: discord.Interaction, mode: Literal["rivals", "league"]):
