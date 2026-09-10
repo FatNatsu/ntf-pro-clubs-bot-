@@ -607,11 +607,35 @@ class SessionCog(commands.Cog):
                 )
                 return
 
-            # Give the requesting team the highest-MMR player currently
-            # available on the Bench, rather than a random pick - subs
-            # should reinforce with the best available player, not a
-            # coin-flip, since MMR is how the whole system judges quality.
-            incoming = max(candidates, key=lambda m: (db.get_player(state["guild_id"], m.id) or {"mmr": 0})["mmr"])
+            # Pick whichever Bench candidate best BALANCES the requesting
+            # team, rather than always the strongest player: work out the
+            # whole session's overall average MMR as a fairness benchmark,
+            # then choose whoever would bring this team's own average
+            # closest to that benchmark. A team sitting below the overall
+            # average naturally gets pulled toward a higher-MMR candidate;
+            # a team sitting above it gets pulled toward a lower-MMR one.
+            guild_id = state["guild_id"]
+            all_active_ids = set()
+            for t in state["teams"].values():
+                all_active_ids |= t["on_field"]
+            all_active_players = [db.get_player(guild_id, pid) for pid in all_active_ids]
+            all_active_players = [p for p in all_active_players if p]
+            overall_avg = (
+                sum(p["mmr"] for p in all_active_players) / len(all_active_players)
+                if all_active_players else config.STARTING_MMR
+            )
+
+            target_team_players = [db.get_player(guild_id, pid) for pid in state["teams"][team_id]["on_field"]]
+            target_team_players = [p for p in target_team_players if p]
+            current_total = sum(p["mmr"] for p in target_team_players)
+            current_count = len(target_team_players)
+
+            candidate_mmr = {m.id: (db.get_player(guild_id, m.id) or {"mmr": config.STARTING_MMR})["mmr"] for m in candidates}
+
+            def resulting_avg(mmr):
+                return (current_total + mmr) / (current_count + 1)
+
+            incoming = min(candidates, key=lambda m: abs(resulting_avg(candidate_mmr[m.id]) - overall_avg))
             team_channel = guild.get_channel(state["teams"][team_id]["voice_channel_id"])
 
             # If they're currently active on a DIFFERENT team, transfer them
