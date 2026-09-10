@@ -103,6 +103,21 @@ async def create_leaderboard_channel(guild):
     return channel
 
 
+async def create_queue_channel(guild):
+    """Permanent, top-level - holds the NTF queue panel. Read-only aside from
+    the bot so it stays a clean, clutter-free entry point (all interaction
+    happens through buttons, nobody needs to type here)."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    channel = await guild.create_text_channel(
+        name=config.QUEUE_CHANNEL_NAME,
+        overwrites=overwrites,
+    )
+    return channel
+
+
 async def move_member_to_channel(guild: discord.Guild, user_id: int, channel: discord.VoiceChannel):
     """
     Discord only lets a bot move members who are ALREADY connected to a

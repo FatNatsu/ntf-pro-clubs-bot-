@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS guild_config (
     guild_id                INTEGER PRIMARY KEY,
     progress_channel_id     INTEGER,
     leaderboard_channel_id  INTEGER,
-    leaderboard_message_id  INTEGER
+    leaderboard_message_id  INTEGER,
+    queue_channel_id        INTEGER
 );
 """
 
