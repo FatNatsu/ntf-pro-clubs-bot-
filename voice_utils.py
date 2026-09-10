@@ -56,17 +56,18 @@ async def create_bench_channel(guild, category, captain_ids, bench_limit=None):
 
 
 async def create_control_channel(guild, category, captain_ids):
-    """Voice channel only captains (and the bot) can see or join."""
+    """Text channel only captains (and the bot) can see or post in - this is
+    where match panels, sub requests, and the end-session button live."""
     overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
-        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True),
+        guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
     for uid in captain_ids:
         member = guild.get_member(uid)
         if member:
-            overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+            overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
-    channel = await guild.create_voice_channel(
+    channel = await guild.create_text_channel(
         name=config.SESSION_CONTROL_CHANNEL_NAME,
         category=category,
         overwrites=overwrites,
