@@ -401,11 +401,18 @@ class SessionCog(commands.Cog):
     # -------------------------------------------------------------- results
     async def finalize_match(self, interaction, match_id, winner_team_id, loser_team_id,
                               winner_score, loser_score, origin_view: MatchControlView, origin_message):
+        # Same reasoning as request_sub: several Discord API calls happen
+        # below (button edit, progress card edit, leaderboard refresh)
+        # before we'd otherwise respond - defer immediately so Discord's
+        # 3-second window doesn't expire and show "didn't respond in time"
+        # while the result is still being recorded.
+        await interaction.response.defer(ephemeral=True)
+
         match = db.get_match(match_id)
         session_id = match["session_id"]
         state = self.active_sessions.get(session_id)
         if not state:
-            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            await interaction.followup.send("This session has ended.", ephemeral=True)
             return
 
         team_a_id, team_b_id = match["team_a_id"], match["team_b_id"]
@@ -450,7 +457,7 @@ class SessionCog(commands.Cog):
         await self._update_progress_field(session_id, match_id, club_a, club_b, score_a, score_b, a_won)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
-        await interaction.response.send_message(f"Result recorded — {winner_club} win ✅", ephemeral=True)
+        await interaction.followup.send(f"Result recorded — {winner_club} win ✅", ephemeral=True)
 
         await self._maybe_advance_round(guild, session_id)
 
@@ -556,22 +563,29 @@ class SessionCog(commands.Cog):
         """No swapping - this just transfers a random player from the Bench
         VC onto the requesting team, filling an empty seat (typically left
         over from a force start)."""
+        # Acknowledge the button press IMMEDIATELY, before any of the slower
+        # Discord API calls below (channel edit, permission grant, member
+        # move) - otherwise Discord's 3-second interaction window can expire
+        # while we're still working, showing "didn't respond in time" even
+        # though the sub itself may still go through in the background.
+        await interaction.response.defer(ephemeral=True)
+
         state = self.active_sessions.get(session_id)
         if not state:
-            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            await interaction.followup.send("This session has ended.", ephemeral=True)
             return
 
         captain_id = state["teams"][team_id]["captain_id"]
         is_admin = interaction.user.guild_permissions.manage_guild
         if interaction.user.id != captain_id and not is_admin:
-            await interaction.response.send_message(f"Only {club_name}'s captain can request a sub.", ephemeral=True)
+            await interaction.followup.send(f"Only {club_name}'s captain can request a sub.", ephemeral=True)
             return
 
         async with state["sub_lock"]:
             # re-fetch state in case the session ended while we were waiting on the lock
             state = self.active_sessions.get(session_id)
             if not state:
-                await interaction.response.send_message("This session has ended.", ephemeral=True)
+                await interaction.followup.send("This session has ended.", ephemeral=True)
                 return
 
             guild = interaction.guild
@@ -584,7 +598,14 @@ class SessionCog(commands.Cog):
                 all_on_field |= t["on_field"]
             candidates = [m for m in bench_channel.members if m.id not in all_on_field]
             if not candidates:
-                await interaction.response.send_message("Nobody is in the Bench right now.", ephemeral=True)
+                your_voice = interaction.user.voice.channel.mention if interaction.user.voice and interaction.user.voice.channel else "not connected to any voice channel"
+                bench_occupants = ", ".join(m.display_name for m in bench_channel.members) if bench_channel.members else "empty"
+                await interaction.followup.send(
+                    f"Nobody eligible is in {bench_channel.mention} right now.\n"
+                    f"Debug info — the bot currently sees you in: **{your_voice}**. "
+                    f"{bench_channel.mention} occupants: **{bench_occupants}**.",
+                    ephemeral=True,
+                )
                 return
 
             incoming = random.choice(candidates)
@@ -609,9 +630,9 @@ class SessionCog(commands.Cog):
         await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench.")
 
         if moved:
-            await interaction.response.send_message(f"<@{incoming.id}> has been moved onto {club_name}.", ephemeral=True)
+            await interaction.followup.send(f"<@{incoming.id}> has been moved onto {club_name}.", ephemeral=True)
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"<@{incoming.id}> has been added to {club_name}, but they weren't in voice so I couldn't drag them — ask them to rejoin the Bench VC.",
                 ephemeral=True,
             )
