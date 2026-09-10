@@ -115,13 +115,21 @@ class QueueCog(commands.Cog):
         self.bot.add_view(QueuePanelView(self))
 
     # -------------------------------------------------------------- panel
-    @app_commands.command(name="queue_panel", description="[Admin] Post the NTF join-queue panel in this channel — players then pick Rivals or League themselves")
+    @app_commands.command(name="queue_panel", description="[Admin] Post the NTF queue panel here — players ready up themselves")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def queue_panel(self, interaction: discord.Interaction):
-        self.panel_channel[interaction.guild_id] = interaction.channel_id
-        embed = self._build_panel_embed(interaction.guild_id)
-        await interaction.response.send_message(embed=embed, view=QueuePanelView(self))
-        self.panel_message[interaction.guild_id] = await interaction.original_response()
+        await interaction.response.send_message("Posting the queue panel…", ephemeral=True)
+        await self.ensure_panel_in_channel(interaction.guild, interaction.channel)
+
+    async def ensure_panel_in_channel(self, guild: discord.Guild, channel: discord.TextChannel):
+        """Posts (or moves) the queue panel into the given channel. Used by
+        both the manual /queue_panel command and the auto-provisioned
+        #ntf-queue channel from /ntf_setup."""
+        self.panel_channel[guild.id] = channel.id
+        embed = self._build_panel_embed(guild.id)
+        message = await channel.send(embed=embed, view=QueuePanelView(self))
+        self.panel_message[guild.id] = message
+        return message
 
     def _build_panel_embed(self, guild_id: int):
         rivals = self._mode_state(guild_id, "rivals")

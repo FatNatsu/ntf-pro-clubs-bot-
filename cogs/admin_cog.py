@@ -19,11 +19,16 @@ class AdminCog(commands.Cog):
     captain_group = app_commands.Group(name="captain", description="Manage this server's captain whitelist")
 
     # ------------------------------------------------------------- one-time setup
-    @app_commands.command(name="ntf_setup", description="[Admin] Create (or locate) this server's permanent #in-progress and #leaderboard channels")
+    @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent #ntf-queue, #in-progress and #leaderboard channels")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def ntf_setup(self, interaction: discord.Interaction):
         guild = interaction.guild
         cfg = db.get_guild_config(guild.id) or {}
+
+        queue_channel = guild.get_channel(cfg.get("queue_channel_id")) if cfg.get("queue_channel_id") else None
+        queue_channel_is_new = queue_channel is None
+        if queue_channel is None:
+            queue_channel = await voice_utils.create_queue_channel(guild)
 
         progress_channel = guild.get_channel(cfg.get("progress_channel_id")) if cfg.get("progress_channel_id") else None
         if progress_channel is None:
@@ -34,15 +39,24 @@ class AdminCog(commands.Cog):
             leaderboard_channel = await voice_utils.create_leaderboard_channel(guild)
 
         db.upsert_guild_config(
-            guild.id, progress_channel_id=progress_channel.id, leaderboard_channel_id=leaderboard_channel.id
+            guild.id,
+            queue_channel_id=queue_channel.id,
+            progress_channel_id=progress_channel.id,
+            leaderboard_channel_id=leaderboard_channel.id,
         )
+
+        if queue_channel_is_new:
+            queue_cog = self.bot.get_cog("QueueCog")
+            if queue_cog:
+                await queue_cog.ensure_panel_in_channel(guild, queue_channel)
 
         await progress_channel.send("🚫 No games are currently in progress.")
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
         await interaction.response.send_message(
-            f"✅ NTF is set up for this server — {progress_channel.mention} and {leaderboard_channel.mention} are ready. "
-            f"These (and your clubs/captains/leaderboard) are separate per server, so other servers NTF is in won't see this data.",
+            f"✅ NTF is set up for this server — {queue_channel.mention}, {progress_channel.mention}, "
+            f"and {leaderboard_channel.mention} are ready. These (and your clubs/captains/leaderboard) "
+            f"are separate per server, so other servers NTF is in won't see this data.",
             ephemeral=True,
         )
 
