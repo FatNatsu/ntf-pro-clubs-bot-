@@ -590,13 +590,12 @@ class SessionCog(commands.Cog):
 
             guild = interaction.guild
             bench_channel = guild.get_channel(state["bench_channel_id"])
-            # Exclude anyone already active on ANY team, not just this one - a
-            # player who's still registered elsewhere shouldn't be double-booked
-            # onto a second team's roster.
-            all_on_field = set()
-            for t in state["teams"].values():
-                all_on_field |= t["on_field"]
-            candidates = [m for m in bench_channel.members if m.id not in all_on_field]
+            # Only exclude people already on THIS team - someone active on a
+            # DIFFERENT team is a valid candidate too, they just get properly
+            # transferred off that team as part of the sub (see below), so a
+            # player can voluntarily bench themselves and get pulled onto a
+            # new team without ever being double-booked on two teams at once.
+            candidates = [m for m in bench_channel.members if m.id not in state["teams"][team_id]["on_field"]]
             if not candidates:
                 your_voice = interaction.user.voice.channel.mention if interaction.user.voice and interaction.user.voice.channel else "not connected to any voice channel"
                 bench_occupants = ", ".join(m.display_name for m in bench_channel.members) if bench_channel.members else "empty"
@@ -611,10 +610,19 @@ class SessionCog(commands.Cog):
             incoming = random.choice(candidates)
             team_channel = guild.get_channel(state["teams"][team_id]["voice_channel_id"])
 
-            # Subs ADD to the roster rather than swapping anyone out - so a sub
-            # can legitimately push a team past the normal 6 (e.g. 6 -> 7).
-            # Raise the VC's user_limit by one first, or Discord will refuse to
-            # move them into an already-full channel.
+            # If they're currently active on a DIFFERENT team, transfer them
+            # off it first - a player can only ever be registered to one
+            # team's roster at a time.
+            for other_team_id, other_info in state["teams"].items():
+                if other_team_id != team_id and incoming.id in other_info["on_field"]:
+                    other_info["on_field"].discard(incoming.id)
+                    db.set_member_role(other_team_id, incoming.id, "sub")
+                    break
+
+            # Subs otherwise ADD to the roster rather than swapping anyone
+            # else out - so a sub can legitimately push a team past the
+            # normal 6 (e.g. 6 -> 7). Raise the VC's user_limit by one first,
+            # or Discord will refuse to move them into an already-full channel.
             try:
                 await team_channel.edit(user_limit=team_channel.user_limit + 1)
             except discord.HTTPException:

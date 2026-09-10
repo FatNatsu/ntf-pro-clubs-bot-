@@ -132,7 +132,8 @@ class AdminCog(commands.Cog):
     @app_commands.command(name="debug_test_session", description="[Admin] TEST ONLY: start a session filled with fake players so you can test solo")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def debug_test_session(self, interaction: discord.Interaction, mode: Literal["rivals", "league"],
-                                  second_tester: discord.Member = None, make_second_tester_captain: bool = False):
+                                  second_tester: discord.Member = None, make_second_tester_captain: bool = False,
+                                  start_on_bench: bool = False):
         guild = interaction.guild
         guild_id = guild.id
         cap = config.QUEUE_CAP[mode]
@@ -205,11 +206,13 @@ class AdminCog(commands.Cog):
         session_id = await session_cog.start_session(guild, mode, players, interaction.channel_id)
 
         state = session_cog.active_sessions.get(session_id)
-        if state:
-            # Always land the real tester on the Bench, regardless of where
-            # the draft put them - as an admin you don't need to be on any
-            # specific team to report match results, and starting on the
-            # Bench is the only way to actually test the sub flow solo.
+        if state and start_on_bench:
+            # Only move you to the Bench if you explicitly asked to test
+            # BEING pulled in as a sub. Leave this off (the default) to test
+            # the OTHER side instead - clicking Add Sub as a captain/admin to
+            # pull someone else in - since clicking that button doesn't
+            # require you to be anywhere in particular, only having
+            # permission to click it.
             assigned_team_id = None
             for team_id, info in state["teams"].items():
                 if real_id in info["on_field"]:
@@ -222,10 +225,22 @@ class AdminCog(commands.Cog):
                 bench_channel = guild.get_channel(state["bench_channel_id"])
                 await voice_utils.move_member_to_channel(guild, real_id, bench_channel)
                 await interaction.followup.send(
-                    f"🪑 You've been moved to the Bench so you can test the sub flow solo — "
-                    f"click **any team's** Add Sub button to pull yourself onto that team.",
+                    f"🪑 You've been moved to the Bench so you can test BEING subbed in — "
+                    f"click **any team's** Add Sub button (as an admin, from any device/account) to pull "
+                    f"yourself onto that team.",
                     ephemeral=True,
                 )
+        elif state:
+            for team_id, info in state["teams"].items():
+                if real_id in info["on_field"]:
+                    await interaction.followup.send(
+                        f"📍 You were drafted onto **{info['club_name']}**. As an admin you can click "
+                        f"**any** team's Add Sub button right now to test pulling someone in — you don't "
+                        f"need to be physically anywhere for that to work. If instead you want to test "
+                        f"BEING pulled in as a sub, re-run this with `start_on_bench:True`.",
+                        ephemeral=True,
+                    )
+                    break
 
 
 async def setup(bot):
