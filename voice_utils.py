@@ -1,0 +1,147 @@
+"""
+All the guild-channel plumbing: creating the session category, the locked
+team voice channels, the bench, the captains-only control room, and the
+public in-progress text channel - plus moving members around.
+
+Split out from the cogs so the Discord-API-shaped code is in one place.
+"""
+
+import discord
+import config
+
+
+async def create_session_category(guild: discord.Guild, session_id: int, mode: str):
+    name = f"{config.SESSION_CATEGORY_PREFIX} #{session_id} ({mode.upper()})"
+    category = await guild.create_category(name=name)
+    return category
+
+
+async def create_team_voice_channel(guild, category, club_name, member_ids, captain_ids):
+    """Locked to TEAM_SIZE. Members + all captains can connect; everyone else can view but not join."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, mute_members=True),
+    }
+    for uid in set(member_ids) | set(captain_ids):
+        member = guild.get_member(uid)
+        if member:
+            overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True)
+
+    channel = await guild.create_voice_channel(
+        name=club_name,
+        category=category,
+        user_limit=config.TEAM_SIZE,
+        overwrites=overwrites,
+    )
+    return channel
+
+
+async def create_bench_channel(guild, category, captain_ids, bench_limit=None):
+    """Bench: visible + joinable by anyone in the session; captains included explicitly.
+    bench_limit lets a force-started session open up extra bench seats to
+    cover the players who weren't in the initial pop (see session_cog.py)."""
+    if bench_limit is None:
+        bench_limit = config.BENCH_SIZE
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, mute_members=True),
+    }
+    channel = await guild.create_voice_channel(
+        name=config.BENCH_CHANNEL_NAME,
+        category=category,
+        user_limit=bench_limit,
+        overwrites=overwrites,
+    )
+    return channel
+
+
+async def create_control_channel(guild, category, captain_ids):
+    """Voice channel only captains (and the bot) can see or join."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True),
+    }
+    for uid in captain_ids:
+        member = guild.get_member(uid)
+        if member:
+            overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+
+    channel = await guild.create_voice_channel(
+        name=config.SESSION_CONTROL_CHANNEL_NAME,
+        category=category,
+        overwrites=overwrites,
+    )
+    return channel
+
+
+async def create_progress_text_channel(guild, category=None):
+    """Public read-only feed: everyone can view, only the bot can post.
+    Pass category=None to create it as a permanent top-level channel
+    (used for the guild-wide #in-progress channel set up once via /ntf_setup)."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    channel = await guild.create_text_channel(
+        name=config.IN_PROGRESS_CHANNEL_NAME,
+        category=category,
+        overwrites=overwrites,
+    )
+    return channel
+
+
+async def create_leaderboard_channel(guild):
+    """Permanent, read-only, top-level - holds the one live-updated leaderboard message."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    channel = await guild.create_text_channel(
+        name=config.LEADERBOARD_CHANNEL_NAME,
+        overwrites=overwrites,
+    )
+    return channel
+
+
+async def move_member_to_channel(guild: discord.Guild, user_id: int, channel: discord.VoiceChannel):
+    """
+    Discord only lets a bot move members who are ALREADY connected to a
+    voice channel somewhere in the guild - it cannot force someone who is
+    not in voice at all to join one. Make sure players hop into any voice
+    channel before the queue pops.
+    """
+    member = guild.get_member(user_id)
+    if member is None or member.voice is None or member.voice.channel is None:
+        return False
+    try:
+        await member.move_to(channel)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def set_spectator_mute(guild: discord.Guild, user_id: int, muted: bool = True):
+    member = guild.get_member(user_id)
+    if member is None:
+        return False
+    try:
+        await member.edit(mute=muted)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+async def allow_member_in_channel(channel: discord.VoiceChannel, member: discord.Member, connect=True):
+    await channel.set_permissions(member, view_channel=True, connect=connect)
+
+
+async def teardown_session_category(guild, category: discord.CategoryChannel):
+    for ch in list(category.channels):
+        try:
+            await ch.delete(reason="Pro Clubs session ended")
+        except discord.HTTPException:
+            pass
+    try:
+        await category.delete(reason="Pro Clubs session ended")
+    except discord.HTTPException:
+        pass
