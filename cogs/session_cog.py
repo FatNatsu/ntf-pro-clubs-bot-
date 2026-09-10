@@ -564,10 +564,6 @@ class SessionCog(commands.Cog):
             await interaction.response.send_message(f"Only {club_name}'s captain can request a sub.", ephemeral=True)
             return
 
-        if len(state["teams"][team_id]["on_field"]) >= config.TEAM_SIZE:
-            await interaction.response.send_message(f"{club_name} is already full ({config.TEAM_SIZE}/{config.TEAM_SIZE}).", ephemeral=True)
-            return
-
         guild = interaction.guild
         bench_channel = guild.get_channel(state["bench_channel_id"])
         candidates = [m for m in bench_channel.members if m.id not in state["teams"][team_id]["on_field"]]
@@ -577,6 +573,15 @@ class SessionCog(commands.Cog):
 
         incoming = random.choice(candidates)
         team_channel = guild.get_channel(state["teams"][team_id]["voice_channel_id"])
+
+        # Subs ADD to the roster rather than swapping anyone out - so a sub
+        # can legitimately push a team past the normal 6 (e.g. 6 -> 7).
+        # Raise the VC's user_limit by one first, or Discord will refuse to
+        # move them into an already-full channel.
+        try:
+            await team_channel.edit(user_limit=team_channel.user_limit + 1)
+        except discord.HTTPException:
+            pass
 
         await voice_utils.allow_member_in_channel(team_channel, incoming, connect=True)
         moved = await voice_utils.move_member_to_channel(guild, incoming.id, team_channel)
