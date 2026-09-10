@@ -122,6 +122,14 @@ class AdminCog(commands.Cog):
         guild_id = guild.id
         cap = config.QUEUE_CAP[mode]
 
+        if interaction.user.voice is None or interaction.user.voice.channel is None:
+            await interaction.response.send_message(
+                "Join any voice channel first — Discord can only drag players who are already connected, "
+                "same as a real queue pop.",
+                ephemeral=True,
+            )
+            return
+
         # You fill one real seat; everything else is a synthetic test account
         # (negative IDs, guaranteed never to collide with a real Discord
         # snowflake) so the team-draft/round/MMR/close flow can run without
@@ -145,10 +153,23 @@ class AdminCog(commands.Cog):
             f"🧪 Starting a **test {mode}** session — you + {len(fake_ids)} fake test bots ({len(players)} total). "
             f"As an admin you can report results for **either side** of every match yourself, so you can play "
             f"through the whole thing solo. Fake players will show as broken mentions — that's expected. "
-            f"Note: this won't test the sub/Bench flow, since fake accounts can't actually sit in a voice channel.",
+            f"Note: this won't fully test the sub/Bench flow with fake accounts, since they can't actually sit "
+            f"in a voice channel.",
             ephemeral=True,
         )
-        await session_cog.start_session(guild, mode, players, interaction.channel_id)
+        session_id = await session_cog.start_session(guild, mode, players, interaction.channel_id)
+
+        state = session_cog.active_sessions.get(session_id)
+        if state:
+            for team_id, info in state["teams"].items():
+                if real_id in info["on_field"]:
+                    await interaction.followup.send(
+                        f"📍 You were drafted onto **{info['club_name']}**. To test the sub flow, join the Bench "
+                        f"VC and click **a different team's** Add Sub button — not {info['club_name']}'s, "
+                        f"since you're already registered there.",
+                        ephemeral=True,
+                    )
+                    break
 
 
 async def setup(bot):

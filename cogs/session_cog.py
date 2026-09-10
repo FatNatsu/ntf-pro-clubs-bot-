@@ -306,6 +306,8 @@ class SessionCog(commands.Cog):
                 f"Captains — check {control_channel_obj.mention}."
             )
 
+        return session_id
+
     async def _post_team_overview(self, guild, session_id):
         state = self.active_sessions[session_id]
         control_channel = guild.get_channel(state["control_channel_id"])
