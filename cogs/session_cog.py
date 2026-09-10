@@ -612,11 +612,20 @@ class SessionCog(commands.Cog):
 
             # If they're currently active on a DIFFERENT team, transfer them
             # off it first - a player can only ever be registered to one
-            # team's roster at a time.
+            # team's roster at a time. Shrink that team's VC back down by one
+            # at the same time, so a transfer is capacity-neutral overall
+            # (one channel +1, the other -1) instead of permanently inflating
+            # every team you've ever passed through.
             for other_team_id, other_info in state["teams"].items():
                 if other_team_id != team_id and incoming.id in other_info["on_field"]:
                     other_info["on_field"].discard(incoming.id)
                     db.set_member_role(other_team_id, incoming.id, "sub")
+                    other_channel = guild.get_channel(other_info["voice_channel_id"])
+                    if other_channel and other_channel.user_limit > config.TEAM_SIZE:
+                        try:
+                            await other_channel.edit(user_limit=other_channel.user_limit - 1)
+                        except discord.HTTPException:
+                            pass
                     break
 
             # Subs otherwise ADD to the roster rather than swapping anyone
