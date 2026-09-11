@@ -741,8 +741,18 @@ class SessionCog(commands.Cog):
         if category:
             await voice_utils.teardown_session_category(guild, category)
 
+        # Fully clear both permanent channels back to a clean slate rather
+        # than just posting a closing message on top of accumulated history.
         if progress_channel:
+            try:
+                await progress_channel.purge(limit=200)
+            except discord.HTTPException:
+                pass
             await progress_channel.send("🚫 No games are currently in progress.")
+
+        queue_cog = self.bot.get_cog("QueueCog")
+        if queue_cog:
+            await queue_cog.reset_channel(guild)
 
         db.end_session(session_id)
         del self.active_sessions[session_id]

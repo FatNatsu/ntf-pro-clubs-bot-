@@ -131,6 +131,24 @@ class QueueCog(commands.Cog):
         self.panel_message[guild.id] = message
         return message
 
+    async def reset_channel(self, guild: discord.Guild):
+        """Wipes #ntf-queue back to a clean slate - called when a session
+        ends, so leftover ready-check/announcement history from that session
+        doesn't linger. Reposts a fresh panel afterward since the old one
+        gets deleted along with everything else."""
+        channel_id = self.panel_channel.get(guild.id)
+        if not channel_id:
+            return
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+        try:
+            await channel.purge(limit=200)
+        except discord.HTTPException:
+            return
+        self.panel_message.pop(guild.id, None)
+        await self.ensure_panel_in_channel(guild, channel)
+
     def _build_panel_embed(self, guild_id: int):
         rivals = self._mode_state(guild_id, "rivals")
         league = self._mode_state(guild_id, "league")
