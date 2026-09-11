@@ -170,7 +170,12 @@ class SpectateView(discord.ui.View):
             moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
             if moved:
                 await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
-                await interaction.response.send_message(f"You're now spectating {club_name} (muted).", ephemeral=True)
+                state["spectators"][member.id] = channel.id
+                await interaction.response.send_message(
+                    f"You're now spectating {club_name} (muted). The mute lifts automatically as soon as you "
+                    f"leave this VC.",
+                    ephemeral=True,
+                )
             else:
                 await interaction.response.send_message(f"Couldn't move you — {reason}.", ephemeral=True)
         return callback
@@ -181,6 +186,23 @@ class SessionCog(commands.Cog):
         self.bot = bot
         # session_id -> runtime state (teams, matches progress, channel ids)
         self.active_sessions: dict[int, dict] = {}
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        """Auto-lifts a spectator's mute the moment they leave the VC they
+        were watching - to Bench, back to general chat, or disconnecting
+        entirely. The mute is only ever meant to last while they're actually
+        sitting in that specific team's channel."""
+        for state in self.active_sessions.values():
+            if state["guild_id"] != member.guild.id:
+                continue
+            watching_channel_id = state["spectators"].get(member.id)
+            if watching_channel_id is None:
+                continue
+            after_channel_id = after.channel.id if after.channel else None
+            if after_channel_id != watching_channel_id:
+                await voice_utils.set_spectator_mute(member.guild, member.id, False)
+                del state["spectators"][member.id]
 
     # ------------------------------------------------------------------ util
     def is_captain_or_admin(self, interaction: discord.Interaction, session_id, team_ids=None):
@@ -290,6 +312,7 @@ class SessionCog(commands.Cog):
             "progress_round_message": None,
             "auto_close_task": None,
             "sub_lock": asyncio.Lock(),
+            "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
         }
 
         await self._post_team_overview(guild, session_id)
@@ -697,6 +720,13 @@ class SessionCog(commands.Cog):
         task = state.get("auto_close_task")
         if task and not task.done() and not natural_completion:
             task.cancel()
+
+        # lift any lingering spectator mutes before the channels disappear -
+        # a server mute is a per-member flag independent of the channel, so
+        # deleting the VC doesn't clear it on its own
+        for spectator_id in list(state["spectators"].keys()):
+            await voice_utils.set_spectator_mute(guild, spectator_id, False)
+        state["spectators"].clear()
 
         progress_channel = guild.get_channel(state["progress_channel_id"])
 
