@@ -169,6 +169,15 @@ def set_mmr(guild_id: int, discord_id: int, new_mmr: int):
         conn.execute("UPDATE players SET mmr=? WHERE guild_id=? AND discord_id=?", (new_mmr, guild_id, discord_id))
 
 
+def bump_mmr(guild_id: int, discord_id: int, delta: int):
+    """Adds delta to a player's current MMR without touching win/loss counts
+    or requiring the caller to know their current rating first - used for
+    flat bonuses like the session-win bonus, as opposed to a full match
+    result (which goes through update_mmr instead)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE players SET mmr = mmr + ? WHERE guild_id=? AND discord_id=?", (delta, guild_id, discord_id))
+
+
 def update_mmr(guild_id: int, discord_id: int, new_mmr: int, won: bool):
     with get_conn() as conn:
         if won:

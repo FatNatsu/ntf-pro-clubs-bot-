@@ -53,12 +53,27 @@ LEAGUE_QUEUE_TIMEOUT_SECONDS = 300  # 5 minutes
 # MMR / Ranks (Elo-style)
 # ---------------------------------------------------------------------------
 STARTING_MMR = 500
-K_FACTOR_DEFAULT = 32   # normal MMR swing per result
-K_FACTOR_A_TIER = 20    # smaller swing once a player is A rank or above
-K_FACTOR_S_TIER = 12    # smallest swing at S rank - the top should move slowly
+
+# Win/loss K-factor (how much a single result moves MMR) per rank. Wins
+# taper down from G (most generous) to S+ (smallest), same as before.
+# Losses now start at ZERO at G - no penalty at all for a loss while you're
+# still learning - and increase steadily through B, so the safety net
+# fades gradually rather than disappearing all at once. From A upward,
+# losses jump back up toward full strength (see the numbers below).
+K_FACTORS = {
+    "G": {"win": 32, "loss": 0},
+    "F": {"win": 30, "loss": 6},
+    "E": {"win": 29, "loss": 12},
+    "D": {"win": 28, "loss": 18},
+    "C": {"win": 27, "loss": 20},
+    "B": {"win": 26, "loss": 22},
+    "A": {"win": 26, "loss": 30},
+    "S": {"win": 16, "loss": 20},
+    "S+": {"win": 10, "loss": 24},
+}
 
 # Rank floor thresholds, low to high. Starting MMR (500) lands new players
-# in D. Top is S at 2500 MMR.
+# in D. Top is S+ at 2500 MMR.
 RANK_THRESHOLDS = [
     ("G", 0),
     ("F", 200),
@@ -67,7 +82,8 @@ RANK_THRESHOLDS = [
     ("C", 800),
     ("B", 1200),
     ("A", 1700),
-    ("S", 2500),
+    ("S", 2000),
+    ("S+", 2500),
 ]
 
 # ---------------------------------------------------------------------------
@@ -83,6 +99,11 @@ QUEUE_CHANNEL_NAME = "🎮 ntf-queue"                # permanent, created once v
 # How long the final standings stay visible in #in-progress before the
 # session's voice channels (including session-control) are torn down.
 SESSION_CLOSE_DELAY_SECONDS = 60
+
+# Small flat MMR bonus for every player on the 1st-place team once a session
+# concludes, on top of whatever they already earned from individual match
+# results - a slight reward for winning the whole session, not just games.
+SESSION_WIN_BONUS_MMR = 15
 
 DB_PATH = os.environ.get("PRO_CLUBS_DB_PATH", "pro_clubs.db")
 

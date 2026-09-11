@@ -6,11 +6,14 @@ the opposing team, and vice versa - standard team-Elo approximation.
 Only individual players carry MMR - teams/clubs never do (club stats are
 plain win/loss records, tracked separately in database.py).
 
-The K-factor (how much a single result moves your MMR) tapers down as a
-player approaches the top of the ladder, so once you're A rank or higher
-your rating moves in smaller steps - wins and losses matter less
-individually the closer you are to S rank, which keeps the top of the
-leaderboard stable instead of swinging wildly on one game.
+The K-factor (how much a single result moves your MMR) is looked up per
+rank from config.K_FACTORS, and splits by outcome at every tier: wins taper
+down steadily from G (the most generous, to help new/low players climb
+fast) all the way to S+ (the smallest), while losses stay flat at full
+strength through B and only ease off gradually from A upward - and even
+then never drop below that tier's win value. So climbing out of the lower
+ranks is comparatively easy, while holding onto a high rank gets
+progressively harder, not easier.
 """
 
 import config
@@ -20,24 +23,18 @@ def expected_score(rating_a: float, rating_b: float) -> float:
     return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
 
 
-def _a_tier_floor():
-    return dict(config.RANK_THRESHOLDS)["A"]
-
-
-def _s_tier_floor():
-    return dict(config.RANK_THRESHOLDS)["S"]
-
-
-def k_factor_for_rating(rating: int) -> int:
-    if rating >= _s_tier_floor():
-        return config.K_FACTOR_S_TIER
-    if rating >= _a_tier_floor():
-        return config.K_FACTOR_A_TIER
-    return config.K_FACTOR_DEFAULT
+def k_factor_for_rating(rating: int, won: bool) -> int:
+    """Looks up the win/loss K-factor for whichever rank this rating falls
+    into - see config.K_FACTORS for the full table and the reasoning
+    behind each tier's numbers."""
+    rank = rank_for_mmr(rating)
+    outcome = "win" if won else "loss"
+    return config.K_FACTORS[rank][outcome]
 
 
 def new_rating(rating: int, expected: float, actual: float) -> int:
-    k = k_factor_for_rating(rating)
+    won = actual >= 1.0
+    k = k_factor_for_rating(rating, won)
     return round(rating + k * (actual - expected))
 
 
