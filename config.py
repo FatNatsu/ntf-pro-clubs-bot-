@@ -52,20 +52,21 @@ LEAGUE_QUEUE_TIMEOUT_SECONDS = 300  # 5 minutes
 # ---------------------------------------------------------------------------
 # MMR / Ranks (Elo-style)
 # ---------------------------------------------------------------------------
-STARTING_MMR = 1200
+STARTING_MMR = 500
 K_FACTOR_DEFAULT = 32   # normal MMR swing per result
 K_FACTOR_A_TIER = 20    # smaller swing once a player is A rank or above
 K_FACTOR_S_TIER = 12    # smallest swing at S rank - the top should move slowly
 
-# Rank floor thresholds, low to high. Bottom rank is G, top is S at 2500 MMR.
+# Rank floor thresholds, low to high. Starting MMR (500) lands new players
+# in D. Top is S at 2500 MMR.
 RANK_THRESHOLDS = [
     ("G", 0),
-    ("F", 1000),
-    ("E", 1200),
-    ("D", 1400),
-    ("C", 1700),
-    ("B", 2000),
-    ("A", 2300),
+    ("F", 200),
+    ("E", 350),
+    ("D", 500),
+    ("C", 800),
+    ("B", 1200),
+    ("A", 1700),
     ("S", 2500),
 ]
 
