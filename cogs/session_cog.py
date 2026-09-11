@@ -543,6 +543,14 @@ class SessionCog(commands.Cog):
         )
 
         medals = ["🥇", "🥈", "🥉", "4️⃣"]
+        winning_team_id = team_ids_ranked[0]
+
+        # Small flat bonus for everyone who finished 1st, on top of whatever
+        # they already earned from individual match results.
+        winning_players = state["teams"][winning_team_id]["on_field"]
+        for pid in winning_players:
+            db.bump_mmr(state["guild_id"], pid, config.SESSION_WIN_BONUS_MMR)
+
         lines = []
         for i, team_id in enumerate(team_ids_ranked):
             club = state["teams"][team_id]["club_name"]
@@ -552,9 +560,10 @@ class SessionCog(commands.Cog):
             gd = goals_for[team_id] - goals_against[team_id]
             gd_text = f"+{gd}" if gd > 0 else str(gd)
             medal = medals[i] if i < len(medals) else f"{i + 1}."
+            bonus_note = f" (+{config.SESSION_WIN_BONUS_MMR} MMR session bonus)" if team_id == winning_team_id else ""
             lines.append(
                 f"{medal} **{club}** — {wins}W-{losses}L — GD {gd_text} "
-                f"({goals_for[team_id]}-{goals_against[team_id]}) — Captain <@{captain}>"
+                f"({goals_for[team_id]}-{goals_against[team_id]}) — Captain <@{captain}>{bonus_note}"
             )
 
         old_pr = state.get("progress_round_message")
@@ -571,6 +580,7 @@ class SessionCog(commands.Cog):
         progress_channel = guild.get_channel(state["progress_channel_id"])
         await control_channel.send(embed=embed)
         await progress_channel.send(embed=embed)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
         state["auto_close_task"] = asyncio.create_task(self._auto_close_after_delay(session_id))
 
