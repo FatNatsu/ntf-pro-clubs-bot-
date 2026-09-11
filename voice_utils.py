@@ -170,7 +170,16 @@ async def set_spectator_mute(guild: discord.Guild, user_id: int, muted: bool = T
 
 
 async def allow_member_in_channel(channel: discord.VoiceChannel, member: discord.Member, connect=True):
-    await channel.set_permissions(member, view_channel=True, connect=connect)
+    """Best-effort - never raises. If the bot lacks Manage Roles (or any
+    other permission issue), this returns False instead of crashing the
+    caller partway through a sub/spectate flow. The bot's own Move Members
+    permission on the channel is often enough to drag someone in regardless,
+    so a failure here shouldn't block the rest of the operation."""
+    try:
+        await channel.set_permissions(member, view_channel=True, connect=connect)
+        return True
+    except discord.HTTPException:
+        return False
 
 
 async def teardown_session_category(guild, category: discord.CategoryChannel):
