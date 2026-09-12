@@ -111,6 +111,21 @@ class QueueCog(commands.Cog):
             "countdown_task": None, "timeout_task": None,
         })
 
+    def _resolve_panel_channel_id(self, guild_id: int):
+        """Falls back to the persisted queue_channel_id (set by /ntf_setup)
+        if this cog's in-memory panel_channel cache is empty - which happens
+        after every bot restart, since that cache is never saved to disk.
+        Without this, actions like reset_channel would silently no-op after
+        any redeploy until someone manually re-ran /queue_panel."""
+        channel_id = self.panel_channel.get(guild_id)
+        if channel_id:
+            return channel_id
+        cfg = db.get_guild_config(guild_id)
+        if cfg and cfg.get("queue_channel_id"):
+            self.panel_channel[guild_id] = cfg["queue_channel_id"]
+            return cfg["queue_channel_id"]
+        return None
+
     async def cog_load(self):
         self.bot.add_view(QueuePanelView(self))
 
@@ -138,7 +153,7 @@ class QueueCog(commands.Cog):
         100 messages at a time - a channel with more history than that would
         otherwise be left partially cleared. Reposts a fresh panel afterward
         since the old one gets deleted along with everything else."""
-        channel_id = self.panel_channel.get(guild.id)
+        channel_id = self._resolve_panel_channel_id(guild.id)
         if not channel_id:
             return
         channel = guild.get_channel(channel_id)
@@ -196,7 +211,7 @@ class QueueCog(commands.Cog):
     async def _refresh_ready_message(self, guild: discord.Guild, mode: str, note: str = None):
         state = self._mode_state(guild.id, mode)
         embed = self._build_ready_embed(mode, state, note)
-        channel_id = self.panel_channel.get(guild.id)
+        channel_id = self._resolve_panel_channel_id(guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel is None:
             return
@@ -337,13 +352,13 @@ class QueueCog(commands.Cog):
         await self._refresh_panel_message(guild.id)
 
         if session_cog is None:
-            channel_id = self.panel_channel.get(guild.id)
+            channel_id = self._resolve_panel_channel_id(guild.id)
             channel = guild.get_channel(channel_id) if channel_id else None
             if channel:
                 await channel.send("⚠️ Session cog not loaded — cannot start the match.")
             return
 
-        announce_channel_id = self.panel_channel.get(guild.id)
+        announce_channel_id = self._resolve_panel_channel_id(guild.id)
         await session_cog.start_session(guild, mode, players, announce_channel_id)
 
     # ---------------------------------------------------- league auto-close
@@ -366,7 +381,7 @@ class QueueCog(commands.Cog):
                 pass
         await self._refresh_panel_message(guild.id)
 
-        channel_id = self.panel_channel.get(guild.id)
+        channel_id = self._resolve_panel_channel_id(guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel:
             who = f" by {closed_by.mention}" if closed_by else ""

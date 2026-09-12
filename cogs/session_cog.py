@@ -14,11 +14,15 @@ import leaderboard_utils
 
 
 class ScoreModal(discord.ui.Modal):
-    """Popup asking for the scoreline once a captain/admin picks a winner."""
+    """Popup asking for the scoreline once a captain/admin picks a winner.
+    went_to_pens changes the labels to make clear this is the regulation
+    score (the shootout winner was already decided by the Penalties button
+    before this modal ever opens) and tags the result accordingly."""
 
     def __init__(self, cog: "SessionCog", match_id, winner_team_id, loser_team_id,
-                 winner_club, loser_club, origin_view, origin_message):
-        super().__init__(title=f"{winner_club} vs {loser_club}")
+                 winner_club, loser_club, origin_view, origin_message, went_to_pens: bool = False):
+        title = f"{winner_club} vs {loser_club}" + (" (Pens)" if went_to_pens else "")
+        super().__init__(title=title)
         self.cog = cog
         self.match_id = match_id
         self.winner_team_id = winner_team_id
@@ -27,12 +31,14 @@ class ScoreModal(discord.ui.Modal):
         self.loser_club = loser_club
         self.origin_view = origin_view
         self.origin_message = origin_message
+        self.went_to_pens = went_to_pens
 
+        score_label_suffix = " (regulation)" if went_to_pens else ""
         self.winner_score = discord.ui.TextInput(
-            label=f"{winner_club} score", placeholder="e.g. 4", max_length=3, required=True
+            label=f"{winner_club} score{score_label_suffix}", placeholder="e.g. 4", max_length=3, required=True
         )
         self.loser_score = discord.ui.TextInput(
-            label=f"{loser_club} score", placeholder="e.g. 2", max_length=3, required=True
+            label=f"{loser_club} score{score_label_suffix}", placeholder="e.g. 2", max_length=3, required=True
         )
         self.add_item(self.winner_score)
         self.add_item(self.loser_score)
@@ -45,8 +51,41 @@ class ScoreModal(discord.ui.Modal):
             w_score, l_score = None, None
         await self.cog.finalize_match(
             interaction, self.match_id, self.winner_team_id, self.loser_team_id,
-            w_score, l_score, self.origin_view, self.origin_message,
+            w_score, l_score, self.origin_view, self.origin_message, self.went_to_pens,
         )
+
+
+class PenaltyPickView(discord.ui.View):
+    """Shown after tapping Penalties - pick which team actually won the
+    shootout, separate from the regulation scoreline entered afterward."""
+
+    def __init__(self, cog: "SessionCog", session_id, match_id,
+                 team_a_id, team_a_club, team_b_id, team_b_club,
+                 origin_view, origin_message):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        self.match_id = match_id
+        self.team_a_id, self.team_a_club = team_a_id, team_a_club
+        self.team_b_id, self.team_b_club = team_b_id, team_b_club
+        self.origin_view = origin_view
+        self.origin_message = origin_message
+
+        btn_a = discord.ui.Button(label=f"{team_a_club} won on pens", style=discord.ButtonStyle.success)
+        btn_b = discord.ui.Button(label=f"{team_b_club} won on pens", style=discord.ButtonStyle.success)
+        btn_a.callback = self._make_callback(team_a_id, team_a_club, team_b_id, team_b_club)
+        btn_b.callback = self._make_callback(team_b_id, team_b_club, team_a_id, team_a_club)
+        self.add_item(btn_a)
+        self.add_item(btn_b)
+
+    def _make_callback(self, winner_id, winner_club, loser_id, loser_club):
+        async def callback(interaction: discord.Interaction):
+            modal = ScoreModal(
+                self.cog, self.match_id, winner_id, loser_id, winner_club, loser_club,
+                self.origin_view, self.origin_message, went_to_pens=True,
+            )
+            await interaction.response.send_modal(modal)
+        return callback
 
 
 class MatchControlView(discord.ui.View):
@@ -66,10 +105,13 @@ class MatchControlView(discord.ui.View):
 
         self.btn_a = discord.ui.Button(label=f"{team_a_club} Win", style=discord.ButtonStyle.danger, emoji="🔴", row=0)
         self.btn_b = discord.ui.Button(label=f"{team_b_club} Win", style=discord.ButtonStyle.danger, emoji="🔴", row=0)
+        self.btn_pens = discord.ui.Button(label="Went to Penalties", style=discord.ButtonStyle.secondary, emoji="⚽", row=1)
         self.btn_a.callback = self._make_callback(team_a_id, team_a_club, team_b_id, team_b_club)
         self.btn_b.callback = self._make_callback(team_b_id, team_b_club, team_a_id, team_a_club)
+        self.btn_pens.callback = self._make_pens_callback()
         self.add_item(self.btn_a)
         self.add_item(self.btn_b)
+        self.add_item(self.btn_pens)
 
     def _make_callback(self, winner_id, winner_club, loser_id, loser_club):
         async def callback(interaction: discord.Interaction):
@@ -84,6 +126,24 @@ class MatchControlView(discord.ui.View):
                 self, interaction.message,
             )
             await interaction.response.send_modal(modal)
+        return callback
+
+    def _make_pens_callback(self):
+        async def callback(interaction: discord.Interaction):
+            if not self.cog.is_captain_or_admin(interaction, self.session_id, {self.team_a_id, self.team_b_id}):
+                await interaction.response.send_message(
+                    "Only a captain of one of these two teams (or a server admin) can report this result.",
+                    ephemeral=True,
+                )
+                return
+            pick_view = PenaltyPickView(
+                self.cog, self.session_id, self.match_id,
+                self.team_a_id, self.team_a_club, self.team_b_id, self.team_b_club,
+                origin_view=self, origin_message=interaction.message,
+            )
+            await interaction.response.send_message(
+                "Who won the penalty shootout?", view=pick_view, ephemeral=True,
+            )
         return callback
 
 
@@ -422,13 +482,14 @@ class SessionCog(commands.Cog):
             "round_no": round_no,
         }
 
-    def _round_result_line(self, club_a, score_a, club_b, score_b, a_won):
+    def _round_result_line(self, club_a, score_a, club_b, score_b, a_won, went_to_pens=False):
         score_text = f"{score_a} - {score_b}" if score_a is not None else "final"
+        pens_tag = " (Pens)" if went_to_pens else ""
         if a_won:
-            return f"🟩 **{club_a}** 👑  {score_text}  {club_b} 🟥"
-        return f"🟥 {club_a}  {score_text}  👑 **{club_b}** 🟩"
+            return f"🟩 **{club_a}** 👑  {score_text}{pens_tag}  {club_b} 🟥"
+        return f"🟥 {club_a}  {score_text}{pens_tag}  👑 **{club_b}** 🟩"
 
-    async def _update_progress_field(self, session_id, match_id, club_a, club_b, score_a, score_b, a_won):
+    async def _update_progress_field(self, session_id, match_id, club_a, club_b, score_a, score_b, a_won, went_to_pens=False):
         state = self.active_sessions.get(session_id)
         pr = state["progress_round_message"] if state else None
         if not pr or match_id not in pr["embed_index"]:
@@ -438,7 +499,7 @@ class SessionCog(commands.Cog):
         try:
             embeds = list(message.embeds)
             fixture_embed = embeds[idx]
-            fixture_embed.description = self._round_result_line(club_a, score_a, club_b, score_b, a_won)
+            fixture_embed.description = self._round_result_line(club_a, score_a, club_b, score_b, a_won, went_to_pens)
             fixture_embed.colour = discord.Color.green() if a_won else discord.Color.red()
             embeds[idx] = fixture_embed
             await message.edit(embeds=embeds)
@@ -447,7 +508,8 @@ class SessionCog(commands.Cog):
 
     # -------------------------------------------------------------- results
     async def finalize_match(self, interaction, match_id, winner_team_id, loser_team_id,
-                              winner_score, loser_score, origin_view: MatchControlView, origin_message):
+                              winner_score, loser_score, origin_view: MatchControlView, origin_message,
+                              went_to_pens: bool = False):
         # Same reasoning as request_sub: several Discord API calls happen
         # below (button edit, progress card edit, leaderboard refresh)
         # before we'd otherwise respond - defer immediately so Discord's
@@ -501,10 +563,11 @@ class SessionCog(commands.Cog):
         await origin_message.edit(view=origin_view)
 
         guild = interaction.guild
-        await self._update_progress_field(session_id, match_id, club_a, club_b, score_a, score_b, a_won)
+        await self._update_progress_field(session_id, match_id, club_a, club_b, score_a, score_b, a_won, went_to_pens)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
-        await interaction.followup.send(f"Result recorded — {winner_club} win ✅", ephemeral=True)
+        pens_note = " (on penalties)" if went_to_pens else ""
+        await interaction.followup.send(f"Result recorded — {winner_club} win{pens_note} ✅", ephemeral=True)
 
         await self._maybe_advance_round(guild, session_id)
 
