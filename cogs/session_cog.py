@@ -169,8 +169,14 @@ class SpectateView(discord.ui.View):
             await voice_utils.allow_member_in_channel(channel, member, connect=True)
             moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
             if moved:
-                await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
+                # Update the "which channel are they watching" record BEFORE
+                # the next await - the move itself fires a voice-state-update
+                # event that the auto-unmute listener reacts to, so if this
+                # dict write happens too late, that listener can see the OLD
+                # channel here, wrongly conclude they've left entirely, and
+                # undo the re-mute below out from under us.
                 state["spectators"][member.id] = channel.id
+                await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
                 await interaction.response.send_message(
                     f"You're now spectating {club_name} (muted). The mute lifts automatically as soon as you "
                     f"leave this VC.",
