@@ -134,8 +134,10 @@ class QueueCog(commands.Cog):
     async def reset_channel(self, guild: discord.Guild):
         """Wipes #ntf-queue back to a clean slate - called when a session
         ends, so leftover ready-check/announcement history from that session
-        doesn't linger. Reposts a fresh panel afterward since the old one
-        gets deleted along with everything else."""
+        doesn't linger. Loops the purge since a single call only grabs up to
+        100 messages at a time - a channel with more history than that would
+        otherwise be left partially cleared. Reposts a fresh panel afterward
+        since the old one gets deleted along with everything else."""
         channel_id = self.panel_channel.get(guild.id)
         if not channel_id:
             return
@@ -143,9 +145,12 @@ class QueueCog(commands.Cog):
         if not channel:
             return
         try:
-            await channel.purge(limit=200)
+            while True:
+                deleted = await channel.purge(limit=100)
+                if len(deleted) < 100:
+                    break
         except discord.HTTPException:
-            return
+            pass
         self.panel_message.pop(guild.id, None)
         await self.ensure_panel_in_channel(guild, channel)
 

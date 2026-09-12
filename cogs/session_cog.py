@@ -154,36 +154,50 @@ class SpectateView(discord.ui.View):
 
     def _make_callback(self, team_id, club_name):
         async def callback(interaction: discord.Interaction):
+            # Defer immediately - several Discord API calls happen below
+            # (permission grant, move, mute) before we'd otherwise respond,
+            # which can blow past Discord's 3-second window under rapid
+            # clicking and show "didn't respond in time".
+            await interaction.response.defer(ephemeral=True)
+
             state = self.cog.active_sessions.get(self.session_id)
             if not state:
-                await interaction.response.send_message("This session has ended.", ephemeral=True)
+                await interaction.followup.send("This session has ended.", ephemeral=True)
                 return
             member = interaction.user
             if member.voice is None or member.voice.channel is None:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Hop into any voice channel first — Discord won't let the bot pull you in from nowhere.",
                     ephemeral=True,
                 )
                 return
-            channel = interaction.guild.get_channel(state["teams"][team_id]["voice_channel_id"])
-            await voice_utils.allow_member_in_channel(channel, member, connect=True)
-            moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
+
+            # Fully serialize spectate switches (and the auto-unmute listener
+            # below) through one lock per session - rapid clicking across
+            # several different Watch buttons was interleaving moves, mutes,
+            # and the auto-unmute listener's checks in ways that occasionally
+            # left someone unmuted even though they were still spectating.
+            async with state["spectate_lock"]:
+                state = self.cog.active_sessions.get(self.session_id)
+                if not state:
+                    await interaction.followup.send("This session has ended.", ephemeral=True)
+                    return
+
+                channel = interaction.guild.get_channel(state["teams"][team_id]["voice_channel_id"])
+                await voice_utils.allow_member_in_channel(channel, member, connect=True)
+                moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
+                if moved:
+                    state["spectators"][member.id] = channel.id
+                    await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
+
             if moved:
-                # Update the "which channel are they watching" record BEFORE
-                # the next await - the move itself fires a voice-state-update
-                # event that the auto-unmute listener reacts to, so if this
-                # dict write happens too late, that listener can see the OLD
-                # channel here, wrongly conclude they've left entirely, and
-                # undo the re-mute below out from under us.
-                state["spectators"][member.id] = channel.id
-                await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"You're now spectating {club_name} (muted). The mute lifts automatically as soon as you "
                     f"leave this VC.",
                     ephemeral=True,
                 )
             else:
-                await interaction.response.send_message(f"Couldn't move you — {reason}.", ephemeral=True)
+                await interaction.followup.send(f"Couldn't move you — {reason}.", ephemeral=True)
         return callback
 
 
@@ -198,17 +212,20 @@ class SessionCog(commands.Cog):
         """Auto-lifts a spectator's mute the moment they leave the VC they
         were watching - to Bench, back to general chat, or disconnecting
         entirely. The mute is only ever meant to last while they're actually
-        sitting in that specific team's channel."""
+        sitting in that specific team's channel. Goes through the same
+        spectate_lock as the Watch buttons themselves, so this can't fire
+        mid-way through a button click still updating that same record."""
         for state in self.active_sessions.values():
             if state["guild_id"] != member.guild.id:
                 continue
-            watching_channel_id = state["spectators"].get(member.id)
-            if watching_channel_id is None:
-                continue
-            after_channel_id = after.channel.id if after.channel else None
-            if after_channel_id != watching_channel_id:
-                await voice_utils.set_spectator_mute(member.guild, member.id, False)
-                del state["spectators"][member.id]
+            async with state["spectate_lock"]:
+                watching_channel_id = state["spectators"].get(member.id)
+                if watching_channel_id is None:
+                    continue
+                after_channel_id = after.channel.id if after.channel else None
+                if after_channel_id != watching_channel_id:
+                    await voice_utils.set_spectator_mute(member.guild, member.id, False)
+                    del state["spectators"][member.id]
 
     # ------------------------------------------------------------------ util
     def is_captain_or_admin(self, interaction: discord.Interaction, session_id, team_ids=None):
@@ -319,6 +336,7 @@ class SessionCog(commands.Cog):
             "auto_close_task": None,
             "sub_lock": asyncio.Lock(),
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
+            "spectate_lock": asyncio.Lock(),
         }
 
         await self._post_team_overview(guild, session_id)
@@ -744,8 +762,6 @@ class SessionCog(commands.Cog):
             await voice_utils.set_spectator_mute(guild, spectator_id, False)
         state["spectators"].clear()
 
-        progress_channel = guild.get_channel(state["progress_channel_id"])
-
         if not natural_completion:
             announce_channel = guild.get_channel(state["announce_channel_id"])
             if announce_channel:
@@ -753,15 +769,43 @@ class SessionCog(commands.Cog):
                 lines = [f"**{info['club_name']}** — Captain <@{info['captain_id']}>" for info in state["teams"].values()]
                 await announce_channel.send(f"🔴 **NTF session ended** by {who}.\n" + "\n".join(lines))
 
+        # Voice infrastructure disappears right away either way - that's the
+        # actual "ending" of the session. The permanent text channels get
+        # cleaned up separately below, with a grace period so people can
+        # still read what happened before it disappears.
         category = guild.get_channel(state["category_id"])
         if category:
             await voice_utils.teardown_session_category(guild, category)
 
-        # Fully clear both permanent channels back to a clean slate rather
-        # than just posting a closing message on top of accumulated history.
+        progress_channel_id = state["progress_channel_id"]
+        guild_id = state["guild_id"]
+
+        db.end_session(session_id)
+        del self.active_sessions[session_id]
+
+        # Natural completion already waited 60s (via _auto_close_after_delay)
+        # BEFORE calling this method, so the grace period has already
+        # happened - clean up immediately. A manual/early end hasn't had any
+        # grace period yet, so give it the same 60 seconds here instead,
+        # as a background task so this method (and whatever button/command
+        # called it) can return right away rather than blocking on the wait.
+        delay = 0 if natural_completion else config.SESSION_CLOSE_DELAY_SECONDS
+        asyncio.create_task(self._finalize_channel_cleanup(guild_id, progress_channel_id, delay))
+
+    async def _finalize_channel_cleanup(self, guild_id: int, progress_channel_id: int, delay: int):
+        if delay:
+            await asyncio.sleep(delay)
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return
+
+        progress_channel = guild.get_channel(progress_channel_id)
         if progress_channel:
             try:
-                await progress_channel.purge(limit=200)
+                while True:
+                    deleted = await progress_channel.purge(limit=100)
+                    if len(deleted) < 100:
+                        break
             except discord.HTTPException:
                 pass
             await progress_channel.send("🚫 No games are currently in progress.")
@@ -769,9 +813,6 @@ class SessionCog(commands.Cog):
         queue_cog = self.bot.get_cog("QueueCog")
         if queue_cog:
             await queue_cog.reset_channel(guild)
-
-        db.end_session(session_id)
-        del self.active_sessions[session_id]
 
     # -------------------------------------------------------------- admin overrides
     @app_commands.command(name="force_end_session", description="[Admin] Force-end an active NTF session, no captain needed")
