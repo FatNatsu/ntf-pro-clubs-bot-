@@ -8,7 +8,7 @@ from discord.ext import commands
 import config
 import database as db
 
-PLATFORM_ICONS = {"PS5": "🎮", "PC": "🖥️"}
+PLATFORM_ICONS = {"Console": "🎮", "PC": "🖥️"}
 
 
 class QueuePanelView(discord.ui.View):
@@ -45,9 +45,9 @@ class PlatformPickView(discord.ui.View):
         self.cog = cog
         self.mode = mode
 
-    @discord.ui.button(label="PS5", style=discord.ButtonStyle.success, emoji="🎮")
-    async def ps5(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_ready(interaction, self.mode, "PS5")
+    @discord.ui.button(label="Console", style=discord.ButtonStyle.success, emoji="🎮")
+    async def console(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_ready(interaction, self.mode, "Console")
 
     @discord.ui.button(label="PC", style=discord.ButtonStyle.success, emoji="🖥️")
     async def pc(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -63,15 +63,15 @@ class ReadyMessageView(discord.ui.View):
         self.cog = cog
         self.mode = mode
 
-        ps5_btn = discord.ui.Button(label="Ready Up (PS5)", style=discord.ButtonStyle.success, emoji="🎮")
+        console_btn = discord.ui.Button(label="Ready Up (Console)", style=discord.ButtonStyle.success, emoji="🎮")
         pc_btn = discord.ui.Button(label="Ready Up (PC)", style=discord.ButtonStyle.success, emoji="🖥️")
         leave_btn = discord.ui.Button(label="Not Ready / Leave", style=discord.ButtonStyle.danger, emoji="🚪")
 
-        ps5_btn.callback = self._make_ready_cb("PS5")
+        console_btn.callback = self._make_ready_cb("Console")
         pc_btn.callback = self._make_ready_cb("PC")
         leave_btn.callback = self._leave_cb
 
-        self.add_item(ps5_btn)
+        self.add_item(console_btn)
         self.add_item(pc_btn)
         self.add_item(leave_btn)
 

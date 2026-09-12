@@ -249,6 +249,16 @@ class SpectateView(discord.ui.View):
 
                 channel = interaction.guild.get_channel(state["teams"][team_id]["voice_channel_id"])
                 await voice_utils.allow_member_in_channel(channel, member, connect=True)
+                # Bump the channel's displayed capacity by one for a
+                # spectator too - it never actually blocked the move (the
+                # bot's own Move Members bypasses that cap regardless), but
+                # showing "7/6" style numbers only for subs and never for
+                # spectators looked inconsistent, so this keeps the number
+                # honest either way.
+                try:
+                    await channel.edit(user_limit=channel.user_limit + 1)
+                except discord.HTTPException:
+                    pass
                 moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
                 if moved:
                     state["spectators"][member.id] = channel.id
@@ -290,6 +300,15 @@ class SessionCog(commands.Cog):
                 if after_channel_id != watching_channel_id:
                     await voice_utils.set_spectator_mute(member.guild, member.id, False)
                     del state["spectators"][member.id]
+                    # Give back the capacity the Watch button borrowed when
+                    # they joined, same as a sub leaving a team - never below
+                    # the normal TEAM_SIZE floor.
+                    watched_channel = member.guild.get_channel(watching_channel_id)
+                    if watched_channel and watched_channel.user_limit > config.TEAM_SIZE:
+                        try:
+                            await watched_channel.edit(user_limit=watched_channel.user_limit - 1)
+                        except discord.HTTPException:
+                            pass
 
     # ------------------------------------------------------------------ util
     def is_captain_or_admin(self, interaction: discord.Interaction, session_id, team_ids=None):
