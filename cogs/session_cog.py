@@ -80,11 +80,15 @@ class PenaltyPickView(discord.ui.View):
 
     def _make_callback(self, winner_id, winner_club, loser_id, loser_club):
         async def callback(interaction: discord.Interaction):
-            modal = ScoreModal(
-                self.cog, self.match_id, winner_id, loser_id, winner_club, loser_club,
+            # No scoreline needed for a penalty win - the shootout winner is
+            # already fully decided by this click, and penalties don't
+            # contribute goals toward the goal-differential tiebreaker (a
+            # shootout isn't "real" goals scored during play), so this
+            # finalizes directly with no score at all.
+            await self.cog.finalize_match(
+                interaction, self.match_id, winner_id, loser_id, None, None,
                 self.origin_view, self.origin_message, went_to_pens=True,
             )
-            await interaction.response.send_modal(modal)
         return callback
 
 
@@ -876,6 +880,14 @@ class SessionCog(commands.Cog):
         queue_cog = self.bot.get_cog("QueueCog")
         if queue_cog:
             await queue_cog.reset_channel(guild)
+
+        # Refresh the leaderboard one more time right alongside the other
+        # two channels resetting - it's already kept live after every match
+        # and the session-win bonus, but this guarantees all three permanent
+        # channels are certainly in sync at this exact moment, regardless of
+        # anything else (manual MMR corrections, etc.) that happened in the
+        # meantime.
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
     # -------------------------------------------------------------- admin overrides
     @app_commands.command(name="force_end_session", description="[Admin] Force-end an active NTF session, no captain needed")
