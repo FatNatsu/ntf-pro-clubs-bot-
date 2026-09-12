@@ -178,6 +178,17 @@ def bump_mmr(guild_id: int, discord_id: int, delta: int):
         conn.execute("UPDATE players SET mmr = mmr + ? WHERE guild_id=? AND discord_id=?", (delta, guild_id, discord_id))
 
 
+def reset_leaderboard(guild_id: int):
+    """Season reset: every player in this guild goes back to the starting
+    MMR with a clean win/loss record. Match/club history is left untouched -
+    only current standing resets, not the historical record."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET mmr=?, wins=0, losses=0 WHERE guild_id=?",
+            (config.STARTING_MMR, guild_id),
+        )
+
+
 def update_mmr(guild_id: int, discord_id: int, new_mmr: int, won: bool):
     with get_conn() as conn:
         if won:
