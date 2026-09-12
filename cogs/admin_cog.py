@@ -5,8 +5,29 @@ from typing import Literal
 
 import config
 import database as db
+import mmr
 import voice_utils
 import leaderboard_utils
+
+
+class ConfirmSeasonResetView(discord.ui.View):
+    def __init__(self, bot, guild_id: int):
+        super().__init__(timeout=30)
+        self.bot = bot
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="Yes, reset the season", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        db.reset_leaderboard(self.guild_id)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+        await interaction.response.edit_message(
+            content=f"✅ Season reset — every player is back to {config.STARTING_MMR} MMR with a clean record.",
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled — no changes made.", view=None)
 
 
 class AdminCog(commands.Cog):
@@ -114,6 +135,32 @@ class AdminCog(commands.Cog):
         db.set_mmr(interaction.guild_id, member.id, mmr)
         await interaction.response.send_message(f"Set {member.mention}'s MMR to {mmr}.", ephemeral=True)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+
+    @app_commands.command(name="deduct_mmr", description="[Admin] Deduct a set amount of MMR from a player (e.g. for a ban)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def deduct_mmr(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        p = db.get_player(interaction.guild_id, member.id)
+        current = p["mmr"] if p else config.STARTING_MMR
+        new_mmr = max(0, current - abs(amount))
+        db.set_mmr(interaction.guild_id, member.id, new_mmr)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+        await interaction.response.send_message(
+            f"➖ Deducted {abs(amount)} MMR from {member.mention}. New MMR: **{new_mmr}** "
+            f"({mmr.rank_for_mmr(new_mmr)}).",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="season_reset", description="[Admin] Reset every player's MMR and W-L back to the start for a new season")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def season_reset(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            f"⚠️ This resets **every player** in this server back to {config.STARTING_MMR} MMR with a clean "
+            f"win/loss record. Match and club history stay intact — only current standing resets. "
+            f"This can't be undone. Continue?",
+            view=ConfirmSeasonResetView(self.bot, interaction.guild_id),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="debug_clear_test_data", description="[Admin] TEST ONLY: remove fake test-bot accounts from the leaderboard")
     @app_commands.checks.has_permissions(manage_guild=True)
