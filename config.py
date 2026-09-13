@@ -9,7 +9,13 @@ import os
 # Auth
 # ---------------------------------------------------------------------------
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
-GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "0"))  # your server ID, for instant slash-command sync
+
+# Comma-separated list of server IDs that get INSTANT slash-command syncing
+# (no waiting on Discord's global propagation delay) - e.g. "111,222,333".
+# Falls back to the older single-ID DISCORD_GUILD_ID variable if that's all
+# that's set, for backward compatibility.
+_raw_guild_ids = os.environ.get("DISCORD_GUILD_IDS", os.environ.get("DISCORD_GUILD_ID", ""))
+GUILD_IDS = [int(g.strip()) for g in _raw_guild_ids.split(",") if g.strip()]
 
 # ---------------------------------------------------------------------------
 # Modes

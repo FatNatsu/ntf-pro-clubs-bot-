@@ -41,11 +41,11 @@ class NTFBot(commands.Bot):
             await self.load_extension(ext)
             log.info("Loaded %s", ext)
 
-        if config.GUILD_ID:
-            guild_obj = discord.Object(id=config.GUILD_ID)
+        for guild_id in config.GUILD_IDS:
+            guild_obj = discord.Object(id=guild_id)
             self.tree.copy_global_to(guild=guild_obj)
             synced = await self.tree.sync(guild=guild_obj)
-            log.info("Synced %d commands to guild %s (instant)", len(synced), config.GUILD_ID)
+            log.info("Synced %d commands to guild %s (instant)", len(synced), guild_id)
 
         # ALWAYS also do a global sync, regardless of whether GUILD_ID is
         # set - otherwise commands only ever exist on that one test server
