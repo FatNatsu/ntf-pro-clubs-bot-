@@ -84,12 +84,18 @@ def pick_random_club_names(available_clubs: list, num_teams: int):
     return names
 
 
-def generate_round_robin(team_ids: list):
+def generate_round_robin(team_ids: list, double_round: bool = False):
     """
     Circle-method round robin: every team plays every other team exactly
     once. For 2 teams -> 1 round of 1 match. For 4 teams -> 3 rounds of 2
     concurrent matches each (every team plays 3 games total), matching the
     "each team plays 3 times" league format.
+
+    double_round=True repeats the whole fixture list as a second leg, so
+    every team faces each opponent twice in total instead of once - used
+    for Rivals, where a single match wouldn't otherwise give a real
+    "best of two" session between the two teams.
+
     Returns: list of rounds, each a list of (team_a_id, team_b_id) tuples.
     """
     teams = list(team_ids)
@@ -107,4 +113,8 @@ def generate_round_robin(team_ids: list):
                 pairs.append((a, b))
         rounds.append(pairs)
         teams.insert(1, teams.pop())
+
+    if double_round:
+        rounds = rounds + [list(pairs) for pairs in rounds]
+
     return rounds
