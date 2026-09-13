@@ -46,9 +46,14 @@ class NTFBot(commands.Bot):
             self.tree.copy_global_to(guild=guild_obj)
             synced = await self.tree.sync(guild=guild_obj)
             log.info("Synced %d commands to guild %s (instant)", len(synced), config.GUILD_ID)
-        else:
-            synced = await self.tree.sync()
-            log.info("Synced %d global commands (can take up to an hour to appear)", len(synced))
+
+        # ALWAYS also do a global sync, regardless of whether GUILD_ID is
+        # set - otherwise commands only ever exist on that one test server
+        # and never appear on any other server (like a friend's) the bot
+        # gets invited to. This can take up to an hour to first appear on a
+        # brand-new server, but only needs to happen once per code change.
+        global_synced = await self.tree.sync()
+        log.info("Synced %d global commands (can take up to an hour to appear on new servers)", len(global_synced))
 
     async def on_ready(self):
         await self.change_presence(activity=discord.Game(name="NTF Pro Clubs"))
