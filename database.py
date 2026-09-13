@@ -220,6 +220,13 @@ def deduct_losses(guild_id: int, discord_id: int, amount: int):
             (new_losses, guild_id, discord_id),
         )
         return new_losses
+
+
+def update_mmr(guild_id: int, discord_id: int, new_mmr: int, won: bool):
+    """Records a full match result: sets the new MMR AND increments the
+    win or loss counter accordingly. This is the function every reported
+    match goes through - set_mmr/bump_mmr are for corrections/bonuses that
+    should NOT touch the win/loss record."""
     with get_conn() as conn:
         if won:
             conn.execute(
