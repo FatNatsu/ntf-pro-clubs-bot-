@@ -30,9 +30,9 @@ async def refresh_leaderboard_channel(bot, guild: discord.Guild):
     if channel is None:
         return
 
-    rows = db.leaderboard(guild.id, 20)
+    rows = db.leaderboard(guild.id, 10)
     embed = build_leaderboard_embed(rows)
-    embed.set_footer(text="Run /leaderboard anywhere to see your own rank highlighted, even outside the top 20.")
+    embed.set_footer(text="Run /leaderboard anywhere to see your own rank highlighted, even outside the top 10.")
 
     message = None
     message_id = cfg.get("leaderboard_message_id")
