@@ -136,6 +136,30 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(f"Set {member.mention}'s MMR to {mmr}.", ephemeral=True)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
 
+    @app_commands.command(name="deduct_wins", description="[Admin] Deduct a set number of wins from a player's record (e.g. for a ban)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def deduct_wins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        new_wins = db.deduct_wins(interaction.guild_id, member.id, amount)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+        await interaction.response.send_message(
+            f"➖ Deducted {abs(amount)} win(s) from {member.mention}. New win count: **{new_wins}**. "
+            f"Their MMR was not touched — use `/deduct_mmr` separately if that also needs adjusting.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="deduct_losses", description="[Admin] Deduct a set number of losses from a player's record")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def deduct_losses(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        new_losses = db.deduct_losses(interaction.guild_id, member.id, amount)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+        await interaction.response.send_message(
+            f"➖ Deducted {abs(amount)} loss(es) from {member.mention}. New loss count: **{new_losses}**. "
+            f"Their MMR was not touched — use `/deduct_mmr` separately if that also needs adjusting.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="deduct_mmr", description="[Admin] Deduct a set amount of MMR from a player (e.g. for a ban)")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def deduct_mmr(self, interaction: discord.Interaction, member: discord.Member, amount: int):
