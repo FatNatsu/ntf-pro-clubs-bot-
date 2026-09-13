@@ -401,7 +401,10 @@ class SessionCog(commands.Cog):
                 db.add_team_member(built_team["_team_id"], pid, role="sub")
                 await voice_utils.move_member_to_channel(guild, pid, bench_channel)
 
-        rounds = team_balance.generate_round_robin(db_team_ids)
+        # Rivals gets a genuine best-of-two - a single match wouldn't be much
+        # of a "session" between just two teams. League stays a single
+        # round robin (each team already plays 3 games there).
+        rounds = team_balance.generate_round_robin(db_team_ids, double_round=(mode == "rivals"))
         db.create_matches(session_id, rounds)
 
         self.active_sessions[session_id] = {
