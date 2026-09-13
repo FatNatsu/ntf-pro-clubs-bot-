@@ -27,7 +27,7 @@ class MMRCog(commands.Cog):
 
     @app_commands.command(name="leaderboard", description="Show this server's top players by MMR, with your own standing highlighted")
     async def leaderboard(self, interaction: discord.Interaction):
-        rows = db.leaderboard(interaction.guild_id, 20)
+        rows = db.leaderboard(interaction.guild_id, 10)
         embed = leaderboard_utils.build_leaderboard_embed(rows, highlight_id=interaction.user.id)
 
         db.ensure_player(interaction.guild_id, interaction.user.id, interaction.user.display_name)

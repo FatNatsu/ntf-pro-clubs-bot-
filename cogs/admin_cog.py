@@ -151,6 +151,25 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="register_everyone", description="[Admin] Add every current server member to the leaderboard at the starting MMR")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def register_everyone(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        added = 0
+        async for member in guild.fetch_members(limit=None):
+            if member.bot:
+                continue
+            if db.get_player(guild.id, member.id) is None:
+                db.ensure_player(guild.id, member.id, member.display_name)
+                added += 1
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
+        await interaction.followup.send(
+            f"✅ Added {added} new member(s) to the leaderboard at {config.STARTING_MMR} MMR. "
+            f"Everyone else was already tracked.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="season_reset", description="[Admin] Reset every player's MMR and W-L back to the start for a new season")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def season_reset(self, interaction: discord.Interaction):
