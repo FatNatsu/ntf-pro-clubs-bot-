@@ -189,7 +189,37 @@ def reset_leaderboard(guild_id: int):
         )
 
 
-def update_mmr(guild_id: int, discord_id: int, new_mmr: int, won: bool):
+def deduct_wins(guild_id: int, discord_id: int, amount: int):
+    """Reduces a player's win count by amount (never below 0), without
+    touching their MMR - for correcting a mistakenly-recorded win or
+    penalizing a banned player's record specifically. Returns the new count."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT wins FROM players WHERE guild_id=? AND discord_id=?", (guild_id, discord_id)
+        ).fetchone()
+        current = row["wins"] if row else 0
+        new_wins = max(0, current - abs(amount))
+        conn.execute(
+            "UPDATE players SET wins=? WHERE guild_id=? AND discord_id=?",
+            (new_wins, guild_id, discord_id),
+        )
+        return new_wins
+
+
+def deduct_losses(guild_id: int, discord_id: int, amount: int):
+    """Reduces a player's loss count by amount (never below 0), without
+    touching their MMR - same reasoning as deduct_wins. Returns the new count."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT losses FROM players WHERE guild_id=? AND discord_id=?", (guild_id, discord_id)
+        ).fetchone()
+        current = row["losses"] if row else 0
+        new_losses = max(0, current - abs(amount))
+        conn.execute(
+            "UPDATE players SET losses=? WHERE guild_id=? AND discord_id=?",
+            (new_losses, guild_id, discord_id),
+        )
+        return new_losses
     with get_conn() as conn:
         if won:
             conn.execute(
