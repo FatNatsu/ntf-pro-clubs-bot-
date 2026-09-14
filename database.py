@@ -591,6 +591,21 @@ def get_all_known_club_names(guild_id):
         return [r["club_name"] for r in rows]
 
 
+def purge_club_history(guild_id: int, club_name: str):
+    """Wipes ALL match/club history for a specific club name - removes it
+    from /club_stats and its autocomplete entirely. Does NOT touch the
+    current club pool - use /club remove separately for that if it's still
+    in there. Returns how many total rows were deleted."""
+    with get_conn() as conn:
+        cur1 = conn.execute(
+            "DELETE FROM match_participants WHERE guild_id=? AND club_name=?", (guild_id, club_name)
+        )
+        cur2 = conn.execute(
+            "DELETE FROM club_match_results WHERE guild_id=? AND club_name=?", (guild_id, club_name)
+        )
+        return cur1.rowcount + cur2.rowcount
+
+
 def clear_test_players(guild_id: int):
     """Removes every synthetic test-bot account (negative discord_id, from
     /debug_test_session) for this guild, along with their match history rows.
