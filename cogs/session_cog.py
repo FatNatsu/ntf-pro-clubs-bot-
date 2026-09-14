@@ -342,7 +342,7 @@ class SessionCog(commands.Cog):
         return channel
 
     # -------------------------------------------------------------- start
-    async def start_session(self, guild: discord.Guild, mode: str, players: list, announce_channel_id: int):
+    async def start_session(self, guild: discord.Guild, mode: str, players: list, announce_channel_id: int, is_test: bool = False):
         num_teams = config.MODE_TEAMS[mode]
         actual_count = len(players)
         target_cap = config.QUEUE_CAP[mode]
@@ -435,6 +435,7 @@ class SessionCog(commands.Cog):
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
             "spectate_lock": asyncio.Lock(),
             "roster_message": None,
+            "is_test": is_test,
         }
 
         await self._post_team_overview(guild, session_id)
@@ -447,8 +448,9 @@ class SessionCog(commands.Cog):
         if announce_channel:
             clubs_line = ", ".join(club_names)
             extra_note = f" ({missing} bench seats reserved for late arrivals.)" if missing else ""
+            test_note = " 🧪 **TEST SESSION — no MMR, wins/losses, or match history will be recorded.**" if is_test else ""
             await announce_channel.send(
-                f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note} "
+                f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
                 f"Captains — check {control_channel_obj.mention}."
             )
 
@@ -602,11 +604,16 @@ class SessionCog(commands.Cog):
         team_a_players = self._team_players_for_match(session_id, team_a_id)
         team_b_players = self._team_players_for_match(session_id, team_b_id)
 
-        # individual player MMR only - clubs/teams never carry MMR themselves
-        mmr_updates = mmr.apply_match_result(team_a_players, team_b_players, a_won)
-        winner_ids = {p["discord_id"] for p in (team_a_players if a_won else team_b_players)}
-        for discord_id, new_mmr in mmr_updates.items():
-            db.update_mmr(state["guild_id"], discord_id, new_mmr, won=discord_id in winner_ids)
+        # Test sessions (/debug_test_session) skip every real-stat write -
+        # no MMR, no win/loss counts, no match/club history - while still
+        # running the full match-reporting flow (buttons, rounds, standings)
+        # so the experience is otherwise identical to a real session.
+        if not state["is_test"]:
+            # individual player MMR only - clubs/teams never carry MMR themselves
+            mmr_updates = mmr.apply_match_result(team_a_players, team_b_players, a_won)
+            winner_ids = {p["discord_id"] for p in (team_a_players if a_won else team_b_players)}
+            for discord_id, new_mmr in mmr_updates.items():
+                db.update_mmr(state["guild_id"], discord_id, new_mmr, won=discord_id in winner_ids)
 
         score_a = winner_score if a_won else loser_score
         score_b = loser_score if a_won else winner_score
@@ -614,11 +621,12 @@ class SessionCog(commands.Cog):
 
         club_a = state["teams"][team_a_id]["club_name"]
         club_b = state["teams"][team_b_id]["club_name"]
-        db.record_match_participants(
-            state["guild_id"], match_id, session_id, team_a_id, team_b_id,
-            [p["discord_id"] for p in team_a_players], [p["discord_id"] for p in team_b_players],
-            club_a, club_b, a_won,
-        )
+        if not state["is_test"]:
+            db.record_match_participants(
+                state["guild_id"], match_id, session_id, team_a_id, team_b_id,
+                [p["discord_id"] for p in team_a_players], [p["discord_id"] for p in team_b_players],
+                club_a, club_b, a_won,
+            )
 
         winner_club = state["teams"][winner_team_id]["club_name"]
 
@@ -637,10 +645,12 @@ class SessionCog(commands.Cog):
 
         guild = interaction.guild
         await self._update_progress_field(session_id, match_id, club_a, club_b, score_a, score_b, a_won, went_to_pens)
-        await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
+        if not state["is_test"]:
+            await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
         pens_note = " (on penalties)" if went_to_pens else ""
-        await interaction.followup.send(f"Result recorded — {winner_club} win{pens_note} ✅", ephemeral=True)
+        test_note = " *(test — not recorded)*" if state["is_test"] else ""
+        await interaction.followup.send(f"Result recorded — {winner_club} win{pens_note} ✅{test_note}", ephemeral=True)
 
         await self._maybe_advance_round(guild, session_id)
 
@@ -706,10 +716,12 @@ class SessionCog(commands.Cog):
         winning_team_id = team_ids_ranked[0]
 
         # Small flat bonus for everyone who finished 1st, on top of whatever
-        # they already earned from individual match results.
-        winning_players = state["teams"][winning_team_id]["on_field"]
-        for pid in winning_players:
-            db.bump_mmr(state["guild_id"], pid, config.SESSION_WIN_BONUS_MMR)
+        # they already earned from individual match results - skipped
+        # entirely for test sessions, same as every other real-stat write.
+        if not state["is_test"]:
+            winning_players = state["teams"][winning_team_id]["on_field"]
+            for pid in winning_players:
+                db.bump_mmr(state["guild_id"], pid, config.SESSION_WIN_BONUS_MMR)
 
         lines = []
         for i, team_id in enumerate(team_ids_ranked):
@@ -720,7 +732,9 @@ class SessionCog(commands.Cog):
             gd = goals_for[team_id] - goals_against[team_id]
             gd_text = f"+{gd}" if gd > 0 else str(gd)
             medal = medals[i] if i < len(medals) else f"{i + 1}."
-            bonus_note = f" (+{config.SESSION_WIN_BONUS_MMR} MMR session bonus)" if team_id == winning_team_id else ""
+            bonus_note = ""
+            if team_id == winning_team_id:
+                bonus_note = " (test — no bonus applied)" if state["is_test"] else f" (+{config.SESSION_WIN_BONUS_MMR} MMR session bonus)"
             lines.append(
                 f"{medal} **{club}** — {wins}W-{losses}L — GD {gd_text} "
                 f"({goals_for[team_id]}-{goals_against[team_id]}) — Captain <@{captain}>{bonus_note}"
@@ -733,14 +747,18 @@ class SessionCog(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        embed = discord.Embed(title="🏁 Session Complete — Final Standings", description="\n".join(lines), color=discord.Color.gold())
-        embed.set_footer(text=f"All player MMR is already up to date. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds.")
+        title = "🏁 Test Session Complete — Final Standings" if state["is_test"] else "🏁 Session Complete — Final Standings"
+        embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.gold())
+        footer = f"Test session — no MMR/stats were recorded. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds." if state["is_test"] else \
+            f"All player MMR is already up to date. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds."
+        embed.set_footer(text=footer)
 
         control_channel = guild.get_channel(state["control_channel_id"])
         progress_channel = guild.get_channel(state["progress_channel_id"])
         await control_channel.send(embed=embed)
         await progress_channel.send(embed=embed)
-        await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
+        if not state["is_test"]:
+            await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
         state["auto_close_task"] = asyncio.create_task(self._auto_close_after_delay(session_id))
 

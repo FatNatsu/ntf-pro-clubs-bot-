@@ -357,7 +357,7 @@ class AdminCog(commands.Cog):
             f"yourself. Fake players will show as broken mentions — that's expected.",
             ephemeral=True,
         )
-        session_id = await session_cog.start_session(guild, mode, players, interaction.channel_id)
+        session_id = await session_cog.start_session(guild, mode, players, interaction.channel_id, is_test=True)
 
         state = session_cog.active_sessions.get(session_id)
         if state and start_on_bench:
