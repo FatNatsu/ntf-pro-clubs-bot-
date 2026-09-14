@@ -212,6 +212,17 @@ def reset_leaderboard(guild_id: int):
         )
 
 
+def reset_club_records(guild_id: int):
+    """Season reset for clubs: wipes every club's win/loss record (and best
+    run / recent form, since those are derived from the same rows) for this
+    guild. The club NAME pool itself (/club add /club remove) is untouched -
+    this only clears the match history behind /club_stats. Returns how many
+    rows were deleted."""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM club_match_results WHERE guild_id=?", (guild_id,))
+        return cur.rowcount
+
+
 def add_wins(guild_id: int, discord_id: int, amount: int):
     """Adds to a player's win count directly, without touching MMR - for
     manually crediting a win that wasn't reported through a session
@@ -298,9 +309,14 @@ def update_mmr(guild_id: int, discord_id: int, new_mmr: int, won: bool):
 
 def leaderboard(guild_id: int, limit=20):
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM players WHERE guild_id=? ORDER BY mmr DESC LIMIT ?", (guild_id, limit)
-        ).fetchall()
+        if limit is None:
+            rows = conn.execute(
+                "SELECT * FROM players WHERE guild_id=? ORDER BY mmr DESC", (guild_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM players WHERE guild_id=? ORDER BY mmr DESC LIMIT ?", (guild_id, limit)
+            ).fetchall()
         return [dict(r) for r in rows]
 
 
