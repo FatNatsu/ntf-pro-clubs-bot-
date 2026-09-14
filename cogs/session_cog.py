@@ -388,6 +388,17 @@ class SessionCog(commands.Cog):
 
         bench_channel = await voice_utils.create_bench_channel(guild, category, captain_ids, bench_limit=bench_limit)
         control_channel = await voice_utils.create_control_channel(guild, category, captain_ids)
+
+        # Once someone is seated on a team's roster, they can no longer
+        # voluntarily sit in Bench and get poached by another team's sub
+        # request - lock them out of Bench specifically. This does NOT
+        # apply to genuine bench-only overflow players (handled separately
+        # below), who are meant to be there.
+        for info in teams_state.values():
+            for pid in info["on_field"]:
+                member = guild.get_member(pid)
+                if member:
+                    await voice_utils.allow_member_in_channel(bench_channel, member, connect=False)
         db.set_session_channels(
             session_id, category_id=category.id, bench_id=bench_channel.id,
             control_id=control_channel.id, progress_id=progress_channel.id,
@@ -423,9 +434,11 @@ class SessionCog(commands.Cog):
             "sub_lock": asyncio.Lock(),
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
             "spectate_lock": asyncio.Lock(),
+            "roster_message": None,
         }
 
         await self._post_team_overview(guild, session_id)
+        await self._post_team_roster(guild, session_id)
         control_channel_obj = guild.get_channel(control_channel.id)
         await control_channel_obj.send(view=SessionControlPanelView(self, session_id, teams_state))
         await self._post_round(guild, session_id, 1)
@@ -456,6 +469,40 @@ class SessionCog(commands.Cog):
             )
         embed.set_footer(text="Report results below. Only captains and admins can click.")
         await control_channel.send(embed=embed)
+
+    def _build_roster_embed(self, session_id):
+        state = self.active_sessions[session_id]
+        embed = discord.Embed(title="📋 Team Rosters", color=discord.Color.blurple())
+        for info in state["teams"].values():
+            member_lines = "\n".join(f"• <@{pid}>" for pid in info["on_field"]) or "*empty*"
+            embed.add_field(
+                name=info["club_name"],
+                value=f"**Captain:** <@{info['captain_id']}>\n{member_lines}",
+                inline=True,
+            )
+        return embed
+
+    async def _post_team_roster(self, guild, session_id):
+        """Posts the roster list to the permanent #in-progress channel so
+        everyone can see who's on which team and who's captaining, without
+        needing session-control access. Kept up to date via
+        _refresh_team_roster whenever a sub changes a team's composition."""
+        state = self.active_sessions[session_id]
+        progress_channel = guild.get_channel(state["progress_channel_id"])
+        message = await progress_channel.send(embed=self._build_roster_embed(session_id))
+        state["roster_message"] = message
+
+    async def _refresh_team_roster(self, session_id):
+        state = self.active_sessions.get(session_id)
+        if not state:
+            return
+        message = state.get("roster_message")
+        if not message:
+            return
+        try:
+            await message.edit(embed=self._build_roster_embed(session_id))
+        except discord.HTTPException:
+            pass
 
     # -------------------------------------------------------------- rounds
     async def _post_round(self, guild, session_id, round_no):
@@ -817,8 +864,16 @@ class SessionCog(commands.Cog):
             state["teams"][team_id]["on_field"].add(incoming.id)
             db.add_team_member(team_id, incoming.id, "player")
 
+            # Now that they're rostered onto a team, lock them out of Bench
+            # too - once assigned, a player can't voluntarily bench
+            # themselves to get poached by yet another team.
+            bench_channel = guild.get_channel(state["bench_channel_id"])
+            if bench_channel:
+                await voice_utils.allow_member_in_channel(bench_channel, incoming, connect=False)
+
         progress_channel = guild.get_channel(state["progress_channel_id"])
         await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench.")
+        await self._refresh_team_roster(session_id)
 
         if moved:
             await interaction.followup.send(f"<@{incoming.id}> has been moved onto {club_name}.", ephemeral=True)

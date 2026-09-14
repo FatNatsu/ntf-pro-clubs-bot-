@@ -40,6 +40,7 @@ class AdminCog(commands.Cog):
 
     club_group = app_commands.Group(name="club", description="Manage this server's pool of club names used for team VCs")
     captain_group = app_commands.Group(name="captain", description="Manage this server's captain whitelist")
+    na_group = app_commands.Group(name="na", description="Manage this server's NA whitelist - keeps NA players together on a team")
 
     # ------------------------------------------------------------- one-time setup
     @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent #ntf-queue, #in-progress and #leaderboard channels")
@@ -126,6 +127,29 @@ class AdminCog(commands.Cog):
             return
         lines = [f"• <@{c['discord_id']}> (MMR {c['mmr']})" for c in caps]
         await interaction.response.send_message("🎖️ **Captain whitelist:**\n" + "\n".join(lines), ephemeral=True)
+
+    # ---------------------------------------------------------------- NA whitelist
+    @na_group.command(name="add", description="Mark a player as NA - the draft will try to keep NA players on the same team")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def na_add(self, interaction: discord.Interaction, member: discord.Member):
+        db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        db.set_na(interaction.guild_id, member.id, True)
+        await interaction.response.send_message(f"🌎 {member.mention} is now marked NA in this server.", ephemeral=True)
+
+    @na_group.command(name="remove", description="Remove a player from the NA whitelist")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def na_remove(self, interaction: discord.Interaction, member: discord.Member):
+        db.set_na(interaction.guild_id, member.id, False)
+        await interaction.response.send_message(f"Removed {member.mention} from the NA whitelist.", ephemeral=True)
+
+    @na_group.command(name="list", description="List all NA-whitelisted players in this server")
+    async def na_list(self, interaction: discord.Interaction):
+        na_players = db.get_na_players(interaction.guild_id)
+        if not na_players:
+            await interaction.response.send_message("No NA players whitelisted yet in this server.", ephemeral=True)
+            return
+        lines = [f"• <@{p['discord_id']}>" for p in na_players]
+        await interaction.response.send_message("🌎 **NA whitelist:**\n" + "\n".join(lines), ephemeral=True)
 
     # ---------------------------------------------------------------- overrides
     @app_commands.command(name="admin_fix_mmr", description="Manually set a player's MMR in this server (corrections only)")
@@ -337,6 +361,12 @@ class AdminCog(commands.Cog):
                 state["teams"][assigned_team_id]["on_field"].discard(real_id)
                 db.set_member_role(assigned_team_id, real_id, "sub")
                 bench_channel = guild.get_channel(state["bench_channel_id"])
+                # We're intentionally un-rostering them for this test, so
+                # explicitly re-open Bench access - normally a rostered
+                # player is locked out of Bench once seated on a team.
+                real_member = guild.get_member(real_id)
+                if real_member:
+                    await voice_utils.allow_member_in_channel(bench_channel, real_member, connect=True)
                 await voice_utils.move_member_to_channel(guild, real_id, bench_channel)
                 await interaction.followup.send(
                     f"🪑 You've been moved to the Bench so you can test BEING subbed in — "
