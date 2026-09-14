@@ -105,6 +105,26 @@ class AdminCog(commands.Cog):
             return
         await interaction.response.send_message("📋 **Club pool:**\n" + "\n".join(f"• {c}" for c in clubs), ephemeral=True)
 
+    @club_group.command(name="purge_history", description="[Admin] Permanently wipe a club's match history (e.g. old test/placeholder names)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def club_purge_history(self, interaction: discord.Interaction, name: str):
+        deleted = db.purge_club_history(interaction.guild_id, name)
+        if deleted == 0:
+            await interaction.response.send_message(f"No history found for **{name}** — nothing to purge.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"🧹 Purged **{name}**'s match history ({deleted} record(s) removed). "
+            f"It'll no longer show up in `/club_stats` or its autocomplete. "
+            f"If it's still in your club pool, use `/club remove` separately to take it out of rotation too.",
+            ephemeral=True,
+        )
+
+    @club_purge_history.autocomplete("name")
+    async def club_purge_history_autocomplete(self, interaction: discord.Interaction, current: str):
+        names = db.get_all_known_club_names(interaction.guild_id)
+        matches = [n for n in names if current.lower() in n.lower()]
+        return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
+
     # ---------------------------------------------------------------- captains
     @captain_group.command(name="add", description="Whitelist a player so they auto-become a captain in this server")
     @app_commands.checks.has_permissions(manage_guild=True)
