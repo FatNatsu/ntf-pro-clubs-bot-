@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import traceback
 from typing import Literal
 
 import discord
@@ -7,6 +9,8 @@ from discord.ext import commands
 
 import config
 import database as db
+
+log = logging.getLogger("ntf")
 
 PLATFORM_ICONS = {"Console": "🎮", "PC": "🖥️"}
 
@@ -75,9 +79,9 @@ class ReadyMessageView(discord.ui.View):
         self.add_item(pc_btn)
         self.add_item(leave_btn)
 
-        if mode == "league":
+        if mode in config.FORCE_START_MIN:
             force_btn = discord.ui.Button(
-                label=f"⚡ Force Start (Admin, {config.FORCE_START_MIN['league']}+)",
+                label=f"⚡ Force Start (Admin, {config.FORCE_START_MIN[mode]}+)",
                 style=discord.ButtonStyle.secondary,
             )
             force_btn.callback = self._force_start_cb
@@ -206,6 +210,8 @@ class QueueCog(commands.Cog):
         embed.add_field(name="Readied up", value="\n".join(lines) if lines else "*nobody yet*", inline=False)
         if mode == "league":
             embed.set_footer(text=f"Admins can Force Start once {config.FORCE_START_MIN['league']}+ are ready. Auto-closes after {config.LEAGUE_QUEUE_TIMEOUT_SECONDS // 60} min if it never gets there.")
+        elif mode in config.FORCE_START_MIN:
+            embed.set_footer(text=f"Admins can Force Start once {config.FORCE_START_MIN[mode]}+ are ready.")
         return embed
 
     async def _refresh_ready_message(self, guild: discord.Guild, mode: str, note: str = None):
@@ -359,7 +365,23 @@ class QueueCog(commands.Cog):
             return
 
         announce_channel_id = self._resolve_panel_channel_id(guild.id)
-        await session_cog.start_session(guild, mode, players, announce_channel_id)
+        try:
+            await session_cog.start_session(guild, mode, players, announce_channel_id)
+        except Exception:
+            # A queue pop runs as a background task with nobody watching it -
+            # without this, a failure here is completely silent: the queue
+            # just resets and nothing else happens, with no error anywhere
+            # a human would see it. Log the full traceback AND post visibly
+            # to the channel so this can never fail invisibly again.
+            log.error("Failed to start session for mode=%s in guild=%s:\n%s", mode, guild.id, traceback.format_exc())
+            channel_id = self._resolve_panel_channel_id(guild.id)
+            channel = guild.get_channel(channel_id) if channel_id else None
+            if channel:
+                await channel.send(
+                    f"🚨 **{mode.title()} queue popped but the session failed to start.** "
+                    f"The queue has been reset - please try again, and let an admin know if this "
+                    f"keeps happening (check the bot's logs for the exact error)."
+                )
 
     # ---------------------------------------------------- league auto-close
     async def _league_timeout(self, guild: discord.Guild):
