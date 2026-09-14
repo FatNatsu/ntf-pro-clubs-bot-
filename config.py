@@ -43,11 +43,14 @@ QUEUE_CAP = {
 # actually locks in and channels get built - last chance to back out.
 READY_COUNTDOWN_SECONDS = 30
 
-# Admins can force-start League early once this many players are readied up,
-# so the bot can still make 4 full teams of 4 even if the queue never fills
-# to 24. Not offered for Rivals (2 teams of 6 is already the minimum shape).
+# Admins can force-start a mode early once this many players are readied
+# up, so the bot can still field full teams even if the queue never fully
+# fills. League needs 16 (4 full teams of 4). Rivals needs 8 (2 teams of 4)
+# - not the full 12, since force-start exists specifically for "enough to
+# make a fair game even if it never fills all the way."
 FORCE_START_MIN = {
     "league": 16,
+    "rivals": 8,
 }
 
 # If League hasn't reached FORCE_START_MIN within this long, it auto-closes
