@@ -307,7 +307,7 @@ def update_mmr(guild_id: int, discord_id: int, new_mmr: int, won: bool):
             )
 
 
-def leaderboard(guild_id: int, limit=20):
+def leaderboard(guild_id: int, limit=20, offset=0):
     with get_conn() as conn:
         if limit is None:
             rows = conn.execute(
@@ -315,9 +315,15 @@ def leaderboard(guild_id: int, limit=20):
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM players WHERE guild_id=? ORDER BY mmr DESC LIMIT ?", (guild_id, limit)
+                "SELECT * FROM players WHERE guild_id=? ORDER BY mmr DESC LIMIT ? OFFSET ?", (guild_id, limit, offset)
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+def count_players(guild_id: int) -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM players WHERE guild_id=?", (guild_id,)).fetchone()
+        return row["c"]
 
 
 def get_player_rank_position(guild_id: int, discord_id: int):

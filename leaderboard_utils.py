@@ -4,9 +4,9 @@ import database as db
 import mmr
 
 
-def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard"):
+def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard", start_rank=1):
     lines = []
-    for i, p in enumerate(rows, start=1):
+    for i, p in enumerate(rows, start=start_rank):
         letter = mmr.rank_for_mmr(p["mmr"])
         marker = "➡️ " if highlight_id and p["discord_id"] == highlight_id else ""
         lines.append(
