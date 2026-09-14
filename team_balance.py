@@ -1,16 +1,21 @@
 """
-Turns a popped queue (list of player dicts: discord_id, mmr, is_captain)
-into balanced teams.
+Turns a popped queue (list of player dicts: discord_id, mmr, is_captain,
+is_na) into balanced teams.
 
 Algorithm:
 1. Pick one captain per team from whoever in the queue is captain-whitelisted
    (highest MMR captains get priority, so captains are themselves roughly
    matched too). If there aren't enough whitelisted captains in the queue,
    the highest-MMR remaining players fill in as captain instead.
-2. Remaining players are sorted by MMR descending and dealt out in a
-   "snake" order (1,2,3,4,4,3,2,1,...) across the teams so total MMR per
-   team stays as close as possible.
-3. Anything beyond TEAM_SIZE per team (shouldn't normally happen given the
+2. Cluster NA-whitelisted players onto as FEW teams as possible (filling one
+   team's remaining seats before moving to the next), so NA players end up
+   playing together rather than scattered - helps with ping/game flow.
+   Anyone who doesn't fit (all teams already full of NA players) falls back
+   into the normal pool below.
+3. Everyone else is sorted by MMR descending and dealt out in a "snake"
+   order (1,2,3,4,4,3,2,1,...) across the teams so total MMR per team stays
+   as close as possible.
+4. Anything beyond TEAM_SIZE per team (shouldn't normally happen given the
    queue caps, but kept for safety) overflows to the bench.
 """
 
@@ -20,7 +25,7 @@ import config
 
 def build_teams(queued_players: list, num_teams: int, initial_team_size: int = None):
     """
-    queued_players: list of dicts {discord_id, display_name, mmr, is_captain}
+    queued_players: list of dicts {discord_id, display_name, mmr, is_captain, is_na}
     initial_team_size: how many starters to seat per team right now (defaults
         to config.TEAM_SIZE). Force-started sessions pass a smaller number
         (e.g. 4 for a 16-player league force start) - the team VOICE
@@ -47,7 +52,27 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
 
     teams = [{"captain": c, "members": [c], "bench": []} for c in chosen_captains]
 
-    # --- 2. snake draft the rest --------------------------------------------
+    # --- 2. cluster NA players onto as few teams as possible ----------------
+    na_players = [p for p in pool if p.get("is_na")]
+    na_players.sort(key=lambda p: -p["mmr"])
+    for p in na_players:
+        pool.remove(p)
+
+    team_idx = 0
+    leftover_na = []
+    for p in na_players:
+        while team_idx < num_teams and len(teams[team_idx]["members"]) >= initial_team_size:
+            team_idx += 1
+        if team_idx >= num_teams:
+            leftover_na.append(p)  # every team is already full of NA players
+            continue
+        teams[team_idx]["members"].append(p)
+
+    # anyone who didn't fit rejoins the general pool so they still get
+    # seated normally via the snake draft below, just not clustered
+    pool = leftover_na + pool
+
+    # --- 3. snake draft the rest --------------------------------------------
     pool.sort(key=lambda p: -p["mmr"])
 
     order = list(range(num_teams))

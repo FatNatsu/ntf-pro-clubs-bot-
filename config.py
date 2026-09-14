@@ -58,7 +58,7 @@ LEAGUE_QUEUE_TIMEOUT_SECONDS = 300  # 5 minutes
 # ---------------------------------------------------------------------------
 # MMR / Ranks (Elo-style)
 # ---------------------------------------------------------------------------
-STARTING_MMR = 500
+STARTING_MMR = 300
 
 # Win/loss K-factor (how much a single result moves MMR) per rank. Wins
 # taper down from G (most generous) to S+ (smallest), same as before.
@@ -82,14 +82,14 @@ K_FACTORS = {
 # in D. Top is S+ at 2500 MMR.
 RANK_THRESHOLDS = [
     ("G", 0),
-    ("F", 167),
-    ("E", 333),
-    ("D", 500),
-    ("C", 600),
-    ("B", 700),
-    ("A", 800),
-    ("S", 900),
-    ("S+", 1000),
+    ("F", 100),
+    ("E", 200),
+    ("D", 300),
+    ("C", 400),
+    ("B", 500),
+    ("A", 600),
+    ("S", 700),
+    ("S+", 800),
 ]
 
 # ---------------------------------------------------------------------------

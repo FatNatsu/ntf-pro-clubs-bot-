@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS players (
     wins            INTEGER NOT NULL DEFAULT 0,
     losses          INTEGER NOT NULL DEFAULT 0,
     is_captain      INTEGER NOT NULL DEFAULT 0,
+    is_na           INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, discord_id)
 );
 
@@ -126,6 +127,14 @@ def get_conn():
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        # Lightweight migration: CREATE TABLE IF NOT EXISTS won't add a new
+        # column to a table that already exists (which it does, on the
+        # persistent volume, for anyone who set this bot up before this
+        # column was added) - so add it here if it's missing.
+        try:
+            conn.execute("ALTER TABLE players ADD COLUMN is_na INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +169,20 @@ def set_captain(guild_id: int, discord_id: int, is_captain: bool):
 def get_captains(guild_id: int):
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM players WHERE guild_id=? AND is_captain=1", (guild_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_na(guild_id: int, discord_id: int, is_na: bool):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET is_na=? WHERE guild_id=? AND discord_id=?",
+            (1 if is_na else 0, guild_id, discord_id),
+        )
+
+
+def get_na_players(guild_id: int):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM players WHERE guild_id=? AND is_na=1", (guild_id,)).fetchall()
         return [dict(r) for r in rows]
 
 
