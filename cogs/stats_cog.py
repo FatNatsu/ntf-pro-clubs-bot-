@@ -25,7 +25,6 @@ class StatsCog(commands.Cog):
         guild_id = interaction.guild_id
         db.ensure_player(guild_id, member.id, member.display_name)
         p = db.get_player(guild_id, member.id)
-        record = db.get_player_record(guild_id, member.id)
         form = db.get_player_recent_form(guild_id, member.id, limit=10)
         best_club = db.get_player_best_club(guild_id, member.id)
         best_mate = db.get_player_most_played_with(guild_id, member.id)
@@ -38,7 +37,7 @@ class StatsCog(commands.Cog):
             embed.set_thumbnail(url=member.display_avatar.url)
 
         embed.add_field(name="Rank", value=f"**{mmr.rank_for_mmr(p['mmr'])}**  ({p['mmr']} MMR)", inline=True)
-        embed.add_field(name="Overall Record", value=f"{record['wins']}W - {record['losses']}L", inline=True)
+        embed.add_field(name="Overall Record", value=f"{p['wins']}W - {p['losses']}L", inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         embed.add_field(name="Recent Form (last 10)", value=_form_string(form), inline=False)

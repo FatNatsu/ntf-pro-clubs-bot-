@@ -160,51 +160,67 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(f"Set {member.mention}'s MMR to {mmr}.", ephemeral=True)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
 
-    @app_commands.command(name="add_wins", description="[Admin] Add a set number of wins to a player's record")
+    @app_commands.command(name="add_wins", description="[Admin] Add wins to a player's record, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def add_wins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        p = db.get_player(interaction.guild_id, member.id)
+        old_mmr = p["mmr"] if p else config.STARTING_MMR
+        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "win", +1)
+        db.set_mmr(interaction.guild_id, member.id, new_mmr)
         new_wins = db.add_wins(interaction.guild_id, member.id, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
             f"➕ Added {abs(amount)} win(s) to {member.mention}. New win count: **{new_wins}**. "
-            f"Their MMR was not touched — use `/admin_fix_mmr` separately if that also needs adjusting.",
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="add_losses", description="[Admin] Add a set number of losses to a player's record")
+    @app_commands.command(name="add_losses", description="[Admin] Add losses to a player's record, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def add_losses(self, interaction: discord.Interaction, member: discord.Member, amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        p = db.get_player(interaction.guild_id, member.id)
+        old_mmr = p["mmr"] if p else config.STARTING_MMR
+        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "loss", -1)
+        db.set_mmr(interaction.guild_id, member.id, new_mmr)
         new_losses = db.add_losses(interaction.guild_id, member.id, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
             f"➕ Added {abs(amount)} loss(es) to {member.mention}. New loss count: **{new_losses}**. "
-            f"Their MMR was not touched — use `/admin_fix_mmr` separately if that also needs adjusting.",
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="deduct_wins", description="[Admin] Deduct a set number of wins from a player's record (e.g. for a ban)")
+    @app_commands.command(name="deduct_wins", description="[Admin] Deduct wins from a player's record, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def deduct_wins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        p = db.get_player(interaction.guild_id, member.id)
+        old_mmr = p["mmr"] if p else config.STARTING_MMR
+        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "win", -1)
+        db.set_mmr(interaction.guild_id, member.id, new_mmr)
         new_wins = db.deduct_wins(interaction.guild_id, member.id, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
             f"➖ Deducted {abs(amount)} win(s) from {member.mention}. New win count: **{new_wins}**. "
-            f"Their MMR was not touched — use `/deduct_mmr` separately if that also needs adjusting.",
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="deduct_losses", description="[Admin] Deduct a set number of losses from a player's record")
+    @app_commands.command(name="deduct_losses", description="[Admin] Deduct losses from a player's record, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def deduct_losses(self, interaction: discord.Interaction, member: discord.Member, amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        p = db.get_player(interaction.guild_id, member.id)
+        old_mmr = p["mmr"] if p else config.STARTING_MMR
+        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "loss", +1)
+        db.set_mmr(interaction.guild_id, member.id, new_mmr)
         new_losses = db.deduct_losses(interaction.guild_id, member.id, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
             f"➖ Deducted {abs(amount)} loss(es) from {member.mention}. New loss count: **{new_losses}**. "
-            f"Their MMR was not touched — use `/deduct_mmr` separately if that also needs adjusting.",
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
