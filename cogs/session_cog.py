@@ -800,6 +800,20 @@ class SessionCog(commands.Cog):
                 )
                 return
 
+            guild_id = state["guild_id"]
+
+            # If this team already has NA players, prefer pulling another NA
+            # player from the Bench too, to keep them grouped together even
+            # through subs - only falls back to the normal candidate pool if
+            # there's no NA player currently available to sub in.
+            team_has_na = any(
+                (db.get_player(guild_id, pid) or {}).get("is_na") for pid in state["teams"][team_id]["on_field"]
+            )
+            if team_has_na:
+                na_candidates = [m for m in candidates if (db.get_player(guild_id, m.id) or {}).get("is_na")]
+                if na_candidates:
+                    candidates = na_candidates
+
             # Pick whichever Bench candidate best BALANCES the requesting
             # team, rather than always the strongest player: work out the
             # whole session's overall average MMR as a fairness benchmark,
@@ -807,7 +821,6 @@ class SessionCog(commands.Cog):
             # closest to that benchmark. A team sitting below the overall
             # average naturally gets pulled toward a higher-MMR candidate;
             # a team sitting above it gets pulled toward a lower-MMR one.
-            guild_id = state["guild_id"]
             all_active_ids = set()
             for t in state["teams"].values():
                 all_active_ids |= t["on_field"]
