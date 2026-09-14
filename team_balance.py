@@ -3,18 +3,21 @@ Turns a popped queue (list of player dicts: discord_id, mmr, is_captain,
 is_na) into balanced teams.
 
 Algorithm:
-1. Pick one captain per team from whoever in the queue is captain-whitelisted
-   (highest MMR captains get priority, so captains are themselves roughly
-   matched too). If there aren't enough whitelisted captains in the queue,
-   the highest-MMR remaining players fill in as captain instead.
-2. Cluster NA-whitelisted players onto as FEW teams as possible (filling one
-   team's remaining seats before moving to the next), so NA players end up
-   playing together rather than scattered - helps with ping/game flow.
-   Anyone who doesn't fit (all teams already full of NA players) falls back
-   into the normal pool below.
-3. Everyone else is sorted by MMR descending and dealt out in a "snake"
-   order (1,2,3,4,4,3,2,1,...) across the teams so total MMR per team stays
-   as close as possible.
+1. If there are any NA-whitelisted players, build dedicated NA team(s)
+   first - one team's worth of NA players, and if there are more than
+   that, a SECOND dedicated NA team too, so more of them actually get to
+   play together rather than sitting out. Each NA team is captained by an
+   NA-whitelisted captain if one exists within that group, otherwise its
+   highest-MMR player. Only genuine overflow beyond what two teams can
+   hold falls back to the Bench. This happens BEFORE normal captain
+   selection specifically so an NA player can never accidentally end up
+   captaining an unrelated team by MMR-tiebreak luck.
+2. The remaining teams get captains chosen normally (whitelisted first,
+   highest MMR fallback) from whoever's left.
+3. Everyone still unassigned is sorted by MMR descending and dealt out in
+   a "snake" order (1,2,3,4,4,3,2,1,...) across ALL teams (including any
+   leftover seats on the NA team) so total MMR per team stays as close as
+   possible.
 4. Anything beyond TEAM_SIZE per team (shouldn't normally happen given the
    queue caps, but kept for safety) overflows to the bench.
 """
@@ -37,57 +40,67 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
     if initial_team_size is None:
         initial_team_size = config.TEAM_SIZE
     pool = list(queued_players)
+    teams = []
 
-    # --- 1. choose captains -------------------------------------------------
+    # --- 1. build dedicated NA team(s) first, if any NA players exist ------
+    # Fill one team; if there are more NA players than that holds, fill a
+    # SECOND dedicated NA team too rather than benching the extras, so more
+    # of them actually get to play together. Only genuine overflow beyond
+    # what two teams can hold falls back to the Bench.
+    na_players = [p for p in pool if p.get("is_na")]
+    if na_players:
+        na_players.sort(key=lambda p: -p["mmr"])
+        for p in na_players:
+            pool.remove(p)
+
+        na_chunks = [na_players[:initial_team_size], na_players[initial_team_size:initial_team_size * 2]]
+        na_overflow = na_players[initial_team_size * 2:]
+
+        for chunk in na_chunks:
+            if not chunk:
+                continue
+            chunk_whitelisted = sorted([p for p in chunk if p["is_captain"]], key=lambda p: -p["mmr"])
+            captain = chunk_whitelisted[0] if chunk_whitelisted else chunk[0]
+            members = [captain] + [p for p in chunk if p is not captain]
+            teams.append({"captain": captain, "members": members, "bench": []})
+
+        if na_overflow and teams:
+            # extremely rare: more NA players than 2 teams can hold between
+            # them - the rest wait on the Bench rather than a third team
+            teams[0]["bench"].extend(na_overflow)
+
+    remaining_teams_needed = num_teams - len(teams)
+
+    # --- 2. choose captains for the remaining teams -------------------------
     whitelisted = sorted([p for p in pool if p["is_captain"]], key=lambda p: -p["mmr"])
-    chosen_captains = whitelisted[:num_teams]
+    chosen_captains = whitelisted[:remaining_teams_needed]
 
-    if len(chosen_captains) < num_teams:
+    if len(chosen_captains) < remaining_teams_needed:
         remaining_pool = [p for p in pool if p not in chosen_captains]
         remaining_pool.sort(key=lambda p: -p["mmr"])
-        chosen_captains += remaining_pool[: num_teams - len(chosen_captains)]
+        chosen_captains += remaining_pool[: remaining_teams_needed - len(chosen_captains)]
 
     for c in chosen_captains:
         pool.remove(c)
+    for c in chosen_captains:
+        teams.append({"captain": c, "members": [c], "bench": []})
 
-    teams = [{"captain": c, "members": [c], "bench": []} for c in chosen_captains]
-
-    # --- 2. cluster NA players onto as few teams as possible ----------------
-    na_players = [p for p in pool if p.get("is_na")]
-    na_players.sort(key=lambda p: -p["mmr"])
-    for p in na_players:
-        pool.remove(p)
-
-    team_idx = 0
-    leftover_na = []
-    for p in na_players:
-        while team_idx < num_teams and len(teams[team_idx]["members"]) >= initial_team_size:
-            team_idx += 1
-        if team_idx >= num_teams:
-            leftover_na.append(p)  # every team is already full of NA players
-            continue
-        teams[team_idx]["members"].append(p)
-
-    # anyone who didn't fit rejoins the general pool so they still get
-    # seated normally via the snake draft below, just not clustered
-    pool = leftover_na + pool
-
-    # --- 3. snake draft the rest --------------------------------------------
+    # --- 3. snake draft everyone else across ALL teams ----------------------
     pool.sort(key=lambda p: -p["mmr"])
 
-    order = list(range(num_teams))
+    order = list(range(len(teams)))
     idx = 0
     direction = 1
     for player in pool:
         team = teams[order[idx]]
-        if len([m for m in team["members"]]) < initial_team_size:
+        if len(team["members"]) < initial_team_size:
             team["members"].append(player)
         else:
             team["bench"].append(player)
 
         idx += direction
-        if idx == num_teams:
-            idx = num_teams - 1
+        if idx == len(teams):
+            idx = len(teams) - 1
             direction = -1
         elif idx < 0:
             idx = 0
