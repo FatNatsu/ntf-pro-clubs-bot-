@@ -23,6 +23,24 @@ def expected_score(rating_a: float, rating_b: float) -> float:
     return 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
 
 
+def simulate_correction(current_mmr: int, count: int, kind: str, sign: int) -> int:
+    """Simulates `count` sequential wins or losses starting from
+    current_mmr, using each step's own rank-based K-factor (since crossing
+    a tier partway through changes it) - used when an admin manually
+    adds/deducts wins or losses, so the MMR moves by whatever that many
+    results would actually have caused, without needing a real opponent
+    for a full Elo calculation.
+    kind: "win" or "loss" - which K-factor column to use.
+    sign: +1 to increase MMR each step, -1 to decrease it each step.
+    """
+    rating = current_mmr
+    for _ in range(count):
+        rank = rank_for_mmr(rating)
+        k = config.K_FACTORS[rank][kind]
+        rating = rating + sign * k
+    return max(0, rating)
+
+
 def k_factor_for_rating(rating: int, won: bool) -> int:
     """Looks up the win/loss K-factor for whichever rank this rating falls
     into - see config.K_FACTORS for the full table and the reasoning
