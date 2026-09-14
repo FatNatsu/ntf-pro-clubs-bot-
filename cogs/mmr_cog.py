@@ -26,9 +26,14 @@ class MMRCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="leaderboard", description="Show this server's top players by MMR, with your own standing highlighted")
-    async def leaderboard(self, interaction: discord.Interaction):
-        rows = db.leaderboard(interaction.guild_id, 10)
-        embed = leaderboard_utils.build_leaderboard_embed(rows, highlight_id=interaction.user.id)
+    async def leaderboard(self, interaction: discord.Interaction, full: bool = False):
+        # full=True lists everyone tracked in this server instead of just the
+        # top 10 - capped at 50 so the embed can't exceed Discord's size
+        # limit, which is plenty for any realistic server size.
+        limit = 50 if full else 10
+        rows = db.leaderboard(interaction.guild_id, limit)
+        title = "🏆 NTF Full Leaderboard" if full else "🏆 NTF Leaderboard"
+        embed = leaderboard_utils.build_leaderboard_embed(rows, highlight_id=interaction.user.id, title=title)
 
         db.ensure_player(interaction.guild_id, interaction.user.id, interaction.user.display_name)
         p = db.get_player(interaction.guild_id, interaction.user.id)

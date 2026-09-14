@@ -19,9 +19,11 @@ class ConfirmSeasonResetView(discord.ui.View):
     @discord.ui.button(label="Yes, reset the season", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         db.reset_leaderboard(self.guild_id)
+        clubs_reset = db.reset_club_records(self.guild_id)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.edit_message(
-            content=f"✅ Season reset — every player is back to {config.STARTING_MMR} MMR with a clean record.",
+            content=f"✅ Season reset — every player is back to {config.STARTING_MMR} MMR with a clean record, "
+                    f"and {clubs_reset} club result(s) were cleared too.",
             view=None,
         )
 
@@ -283,8 +285,9 @@ class AdminCog(commands.Cog):
     async def season_reset(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             f"⚠️ This resets **every player** in this server back to {config.STARTING_MMR} MMR with a clean "
-            f"win/loss record. Match and club history stay intact — only current standing resets. "
-            f"This can't be undone. Continue?",
+            f"win/loss record, AND wipes every **club's** win/loss record too. Player match history "
+            f"(recent form, best club, most-played-with) stays intact — only current standings reset, not "
+            f"the historical log. This can't be undone. Continue?",
             view=ConfirmSeasonResetView(self.bot, interaction.guild_id),
             ephemeral=True,
         )
