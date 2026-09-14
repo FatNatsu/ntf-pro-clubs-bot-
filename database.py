@@ -189,6 +189,39 @@ def reset_leaderboard(guild_id: int):
         )
 
 
+def add_wins(guild_id: int, discord_id: int, amount: int):
+    """Adds to a player's win count directly, without touching MMR - for
+    manually crediting a win that wasn't reported through a session
+    (e.g. an undercount correction). Returns the new count."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT wins FROM players WHERE guild_id=? AND discord_id=?", (guild_id, discord_id)
+        ).fetchone()
+        current = row["wins"] if row else 0
+        new_wins = current + abs(amount)
+        conn.execute(
+            "UPDATE players SET wins=? WHERE guild_id=? AND discord_id=?",
+            (new_wins, guild_id, discord_id),
+        )
+        return new_wins
+
+
+def add_losses(guild_id: int, discord_id: int, amount: int):
+    """Adds to a player's loss count directly, without touching MMR - same
+    reasoning as add_wins. Returns the new count."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT losses FROM players WHERE guild_id=? AND discord_id=?", (guild_id, discord_id)
+        ).fetchone()
+        current = row["losses"] if row else 0
+        new_losses = current + abs(amount)
+        conn.execute(
+            "UPDATE players SET losses=? WHERE guild_id=? AND discord_id=?",
+            (new_losses, guild_id, discord_id),
+        )
+        return new_losses
+
+
 def deduct_wins(guild_id: int, discord_id: int, amount: int):
     """Reduces a player's win count by amount (never below 0), without
     touching their MMR - for correcting a mistakenly-recorded win or
