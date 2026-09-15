@@ -491,6 +491,7 @@ class SessionCog(commands.Cog):
 
         teams_state = {}
         db_team_ids = []
+        failed_moves = []  # (discord_id, intended_club_or_bench, reason) - reported to players after seating
         for i, built_team in enumerate(built):
             club_name = club_names[i]
             captain = built_team["captain"]
@@ -507,7 +508,9 @@ class SessionCog(commands.Cog):
 
             for pid in member_ids:
                 db.add_team_member(team_id, pid, role="player")
-                await voice_utils.move_member_to_channel(guild, pid, channel)
+                moved, reason = await voice_utils.move_member_to_channel(guild, pid, channel)
+                if not moved:
+                    failed_moves.append((pid, club_name, reason))
 
             teams_state[team_id] = {
                 "club_name": club_name,
@@ -541,7 +544,9 @@ class SessionCog(commands.Cog):
             for bench_player in built_team["bench"]:
                 pid = bench_player["discord_id"]
                 db.add_team_member(built_team["_team_id"], pid, role="sub")
-                await voice_utils.move_member_to_channel(guild, pid, bench_channel)
+                moved, reason = await voice_utils.move_member_to_channel(guild, pid, bench_channel)
+                if not moved:
+                    failed_moves.append((pid, "Bench", reason))
 
         # Rivals gets a genuine best-of-two - a single match wouldn't be much
         # of a "session" between just two teams. League stays a single
@@ -585,6 +590,17 @@ class SessionCog(commands.Cog):
                 f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
                 f"Captains — check {control_channel_obj.mention}."
             )
+            if failed_moves:
+                # Discord can only move someone who's already connected to a
+                # voice channel somewhere - this can't be forced, so anyone
+                # not already in voice when the queue popped needs to join
+                # their own VC manually rather than silently being left
+                # nowhere with no one aware of it.
+                lines = [f"• <@{pid}> → **{dest}** ({reason})" for pid, dest, reason in failed_moves]
+                await announce_channel.send(
+                    "⚠️ **Couldn't automatically move these players into voice — they'll need to join manually:**\n"
+                    + "\n".join(lines)
+                )
 
         return session_id
 
@@ -639,6 +655,22 @@ class SessionCog(commands.Cog):
             pass
 
     # -------------------------------------------------------------- rounds
+    async def _send_with_retry(self, coro_func, *args, retries=2, delay=1.5, **kwargs):
+        """Retries a Discord API call a couple extra times on a transient
+        DiscordServerError (5xx) before giving up - Discord's own
+        infrastructure occasionally has brief outages that resolve within a
+        second or two, so a short retry avoids aborting an entire session
+        creation over what's usually just a passing blip on their end."""
+        last_exc = None
+        for attempt in range(retries + 1):
+            try:
+                return await coro_func(*args, **kwargs)
+            except discord.DiscordServerError as e:
+                last_exc = e
+                if attempt < retries:
+                    await asyncio.sleep(delay)
+        raise last_exc
+
     async def _post_round(self, guild, session_id, round_no):
         state = self.active_sessions[session_id]
         matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
@@ -646,7 +678,7 @@ class SessionCog(commands.Cog):
         progress_channel = guild.get_channel(state["progress_channel_id"])
 
         # clear round divider so captains can tell fixtures apart at a glance
-        await control_channel.send(f"**━━━━━━━━━━ ROUND {round_no} ━━━━━━━━━━**")
+        await self._send_with_retry(control_channel.send, f"**━━━━━━━━━━ ROUND {round_no} ━━━━━━━━━━**")
 
         watch_targets = []
         embed_index = {}
@@ -661,7 +693,7 @@ class SessionCog(commands.Cog):
                 color=discord.Color.orange(),
             )
             view = MatchControlView(self, session_id, match["id"], match["team_a_id"], club_a, match["team_b_id"], club_b)
-            await control_channel.send(embed=control_embed, view=view)
+            await self._send_with_retry(control_channel.send, embed=control_embed, view=view)
 
             # one SEPARATE embed per fixture in #in-progress - a distinct
             # coloured card per matchup is a much clearer split between the
@@ -681,7 +713,7 @@ class SessionCog(commands.Cog):
         all_embeds = [header_embed] + progress_embeds
 
         spectate_view = SpectateView(self, session_id, watch_targets)
-        progress_message = await progress_channel.send(embeds=all_embeds, view=spectate_view)
+        progress_message = await self._send_with_retry(progress_channel.send, embeds=all_embeds, view=spectate_view)
 
         state["progress_round_message"] = {
             "message": progress_message,
