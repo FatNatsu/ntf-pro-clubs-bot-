@@ -208,9 +208,7 @@ class QueueCog(commands.Cog):
         desc = note or f"**{len(state['ready'])}/{cap} ready**"
         embed = discord.Embed(title=title, description=desc, color=discord.Color.blue())
         embed.add_field(name="Readied up", value="\n".join(lines) if lines else "*nobody yet*", inline=False)
-        if mode == "league":
-            embed.set_footer(text=f"Admins can Force Start once {config.FORCE_START_MIN['league']}+ are ready. Auto-closes after {config.LEAGUE_QUEUE_TIMEOUT_SECONDS // 60} min if it never gets there.")
-        elif mode in config.FORCE_START_MIN:
+        if mode in config.FORCE_START_MIN:
             embed.set_footer(text=f"Admins can Force Start once {config.FORCE_START_MIN[mode]}+ are ready.")
         return embed
 
@@ -262,13 +260,9 @@ class QueueCog(commands.Cog):
             other_state["platforms"].pop(user.id, None)
             await self._refresh_ready_message(guild, other_mode)
 
-        is_first_join = len(state["ready"]) == 0
         if user.id not in state["ready"]:
             state["ready"].append(user.id)
         state["platforms"][user.id] = platform
-
-        if mode == "league" and is_first_join and state["timeout_task"] is None:
-            state["timeout_task"] = asyncio.create_task(self._league_timeout(guild))
 
         await interaction.response.send_message(
             f"✅ Readied up for **{mode.title()}** as {PLATFORM_ICONS[platform]} {platform} "
@@ -382,14 +376,6 @@ class QueueCog(commands.Cog):
                     f"The queue has been reset - please try again, and let an admin know if this "
                     f"keeps happening (check the bot's logs for the exact error)."
                 )
-
-    # ---------------------------------------------------- league auto-close
-    async def _league_timeout(self, guild: discord.Guild):
-        await asyncio.sleep(config.LEAGUE_QUEUE_TIMEOUT_SECONDS)
-        state = self._mode_state(guild.id, "league")
-        minimum = config.FORCE_START_MIN["league"]
-        if state["ready"] and len(state["ready"]) < minimum:
-            await self._close_queue(guild, "league", reason=f"not enough players joined within {config.LEAGUE_QUEUE_TIMEOUT_SECONDS // 60} minutes")
 
     # -------------------------------------------------------------- close
     async def _close_queue(self, guild: discord.Guild, mode: str, reason: str, closed_by: discord.Member = None):
