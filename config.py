@@ -41,7 +41,7 @@ QUEUE_CAP = {
 
 # Once the queue hits its cap, players get a grace window before the session
 # actually locks in and channels get built - last chance to back out.
-READY_COUNTDOWN_SECONDS = 30
+READY_COUNTDOWN_SECONDS = 15
 
 # Admins can force-start a mode early once this many players are readied
 # up, so the bot can still field full teams even if the queue never fully
