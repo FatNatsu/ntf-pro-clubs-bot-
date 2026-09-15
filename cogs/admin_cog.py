@@ -280,6 +280,22 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="prune_left_members", description="[Admin] Remove tracked players who are no longer in this server")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def prune_left_members(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        active_ids = set()
+        async for member in guild.fetch_members(limit=None):
+            active_ids.add(member.id)
+        removed = db.prune_left_members(guild.id, active_ids)
+        await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
+        await interaction.followup.send(
+            f"🧹 Removed {removed} player(s) who are no longer in this server. Their match/club history "
+            f"stays intact for reference — only their leaderboard entry was cleared.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="season_reset", description="[Admin] Reset every player's MMR and W-L back to the start for a new season")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def season_reset(self, interaction: discord.Interaction):

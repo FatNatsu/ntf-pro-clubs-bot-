@@ -12,6 +12,14 @@ def _form_string(form_list):
     return " ".join("🟢" if r == "W" else "🔴" for r in form_list)
 
 
+def _streak_string(streak_type, count):
+    if streak_type is None or count == 0:
+        return "*no matches played yet*"
+    if streak_type == "W":
+        return f"🔥 {count}-game win streak"
+    return f"❄️ {count}-game loss streak"
+
+
 class StatsCog(commands.Cog):
     """/player_stats and /club_stats — scoped to the server you run them in.
     Point these at a dedicated #stats channel if you want, they work anywhere."""
@@ -26,6 +34,7 @@ class StatsCog(commands.Cog):
         db.ensure_player(guild_id, member.id, member.display_name)
         p = db.get_player(guild_id, member.id)
         form = db.get_player_recent_form(guild_id, member.id, limit=10)
+        streak_type, streak_count = db.get_player_streak(guild_id, member.id)
         best_club = db.get_player_best_club(guild_id, member.id)
         best_mate = db.get_player_most_played_with(guild_id, member.id)
 
@@ -38,7 +47,7 @@ class StatsCog(commands.Cog):
 
         embed.add_field(name="Rank", value=f"**{mmr.rank_for_mmr(p['mmr'])}**  ({p['mmr']} MMR)", inline=True)
         embed.add_field(name="Overall Record", value=f"{p['wins']}W - {p['losses']}L", inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        embed.add_field(name="Current Streak", value=_streak_string(streak_type, streak_count), inline=True)
 
         embed.add_field(name="Recent Form (last 10)", value=_form_string(form), inline=False)
 
@@ -55,6 +64,31 @@ class StatsCog(commands.Cog):
         if p["is_captain"]:
             embed.set_footer(text="🎖️ Whitelisted captain")
 
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="head_to_head", description="Compare two players' record specifically against each other")
+    async def head_to_head(self, interaction: discord.Interaction, player_a: discord.Member, player_b: discord.Member = None):
+        player_b = player_b or interaction.user
+        if player_a.id == player_b.id:
+            await interaction.response.send_message("Pick two different players.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild_id
+        db.ensure_player(guild_id, player_a.id, player_a.display_name)
+        db.ensure_player(guild_id, player_b.id, player_b.display_name)
+        a_wins, b_wins, total = db.get_head_to_head(guild_id, player_a.id, player_b.id)
+
+        if total == 0:
+            await interaction.response.send_message(
+                f"{player_a.mention} and {player_b.mention} haven't been on opposing teams in a recorded match yet.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(title=f"⚔️ {player_a.display_name} vs {player_b.display_name}", color=discord.Color.orange())
+        embed.add_field(name=player_a.display_name, value=f"**{a_wins}** win(s)", inline=True)
+        embed.add_field(name=player_b.display_name, value=f"**{b_wins}** win(s)", inline=True)
+        embed.set_footer(text=f"{total} meeting(s) as opponents (games where they were teammates don't count here)")
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="club_stats", description="View a club's record and best run in this server")
