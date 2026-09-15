@@ -218,6 +218,76 @@ class TransferDestinationView(discord.ui.View):
             )
 
 
+class ReassignCaptainPlayerSelectView(discord.ui.View):
+    """Second step of reassigning a captain - pick the new captain from
+    that team's current roster."""
+
+    def __init__(self, cog: "SessionCog", session_id, team_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        self.team_id = team_id
+        state = cog.active_sessions[session_id]
+        info = state["teams"][team_id]
+
+        options = []
+        for pid in info["on_field"]:
+            member = cog.bot.get_user(pid)
+            label = member.display_name if member else str(pid)
+            if pid == info["captain_id"]:
+                label += " (current captain)"
+            options.append(discord.SelectOption(label=label, value=str(pid)))
+
+        if options:
+            select = discord.ui.Select(placeholder=f"New captain for {info['club_name']}?", options=options[:25])
+            select.callback = self._on_select
+            self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        new_captain_id = int(interaction.data["values"][0])
+        await interaction.response.defer(ephemeral=True)
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.followup.send("This session has ended.", ephemeral=True)
+            return
+        if new_captain_id == state["teams"][self.team_id]["captain_id"]:
+            await interaction.followup.send("They're already the captain of that team.", ephemeral=True)
+            return
+        await self.cog.reassign_captain(interaction.guild, self.session_id, self.team_id, new_captain_id)
+        club_name = state["teams"][self.team_id]["club_name"]
+        await interaction.followup.send(f"🎖️ <@{new_captain_id}> is now the captain of **{club_name}**.", ephemeral=True)
+
+
+class ReassignCaptainTeamSelectView(discord.ui.View):
+    """First step of reassigning a captain - pick which team needs a new one."""
+
+    def __init__(self, cog: "SessionCog", session_id):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        state = cog.active_sessions[session_id]
+        options = [
+            discord.SelectOption(label=f"{info['club_name']} (captain: {cog.bot.get_user(info['captain_id']).display_name if cog.bot.get_user(info['captain_id']) else info['captain_id']})", value=str(team_id))
+            for team_id, info in state["teams"].items()
+        ]
+        select = discord.ui.Select(placeholder="Which team needs a new captain?", options=options[:25])
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        team_id = int(interaction.data["values"][0])
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        view = ReassignCaptainPlayerSelectView(self.cog, self.session_id, team_id)
+        if not view.children:
+            await interaction.response.send_message("Nobody is currently rostered on that team.", ephemeral=True)
+            return
+        club_name = state["teams"][team_id]["club_name"]
+        await interaction.response.send_message(f"Who should captain **{club_name}**?", view=view, ephemeral=True)
+
+
 class TransferPlayerSelectView(discord.ui.View):
     """First step of a manual transfer - pick which currently-rostered
     player to move. Only lists players actively on a team, not fake/test
@@ -271,6 +341,10 @@ class SessionControlPanelView(discord.ui.View):
         transfer_btn.callback = self._transfer_callback
         self.add_item(transfer_btn)
 
+        reassign_btn = discord.ui.Button(label="Reassign Captain", style=discord.ButtonStyle.primary, emoji="🎖️")
+        reassign_btn.callback = self._reassign_captain_callback
+        self.add_item(reassign_btn)
+
         end_btn = discord.ui.Button(label="End Session", style=discord.ButtonStyle.danger, emoji="🛑")
         end_btn.callback = self._end_callback
         self.add_item(end_btn)
@@ -297,6 +371,20 @@ class SessionControlPanelView(discord.ui.View):
             await interaction.response.send_message("Nobody is currently rostered to transfer.", ephemeral=True)
             return
         await interaction.response.send_message("Who do you want to transfer?", view=view, ephemeral=True)
+
+    async def _reassign_captain_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only an admin can reassign a team's captain.",
+                ephemeral=True,
+            )
+            return
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        view = ReassignCaptainTeamSelectView(self.cog, self.session_id)
+        await interaction.response.send_message("Which team needs a new captain?", view=view, ephemeral=True)
 
     async def _end_callback(self, interaction: discord.Interaction):
         state = self.cog.active_sessions.get(self.session_id)
@@ -904,10 +992,13 @@ class SessionCog(commands.Cog):
         # Small flat bonus for everyone who finished 1st, on top of whatever
         # they already earned from individual match results - skipped
         # entirely for test sessions, same as every other real-stat write.
+        # Recording the winner for /session_history follows the same rule,
+        # so test sessions never pollute the real history.
         if not state["is_test"]:
             winning_players = state["teams"][winning_team_id]["on_field"]
             for pid in winning_players:
                 db.bump_mmr(state["guild_id"], pid, config.SESSION_WIN_BONUS_MMR)
+            db.set_session_winner(session_id, winning_team_id)
 
         lines = []
         for i, team_id in enumerate(team_ids_ranked):
@@ -1182,6 +1273,49 @@ class SessionCog(commands.Cog):
         await self._refresh_team_roster(session_id)
 
         return True, moved, reason
+
+    # -------------------------------------------------------------- captain reassignment
+    async def reassign_captain(self, guild: discord.Guild, session_id: int, team_id: int, new_captain_id: int):
+        """Hands captain status to someone else already on that team's
+        roster - grants them the same Move Members access every captain has
+        across ALL team VCs and the Bench, plus view/send on session-control.
+        The outgoing captain's access is left as-is rather than revoked, so
+        nothing risks breaking mid-session over a permission removal - the
+        only thing that actually changes for match-reporting purposes is
+        which captain_id is authorized to report results for this team."""
+        state = self.active_sessions[session_id]
+        old_captain_id = state["teams"][team_id]["captain_id"]
+        state["teams"][team_id]["captain_id"] = new_captain_id
+        db.set_captain(state["guild_id"], new_captain_id, True)
+
+        new_captain = guild.get_member(new_captain_id)
+        if new_captain:
+            for other_info in state["teams"].values():
+                team_channel = guild.get_channel(other_info["voice_channel_id"])
+                if team_channel:
+                    await voice_utils.allow_member_in_channel(team_channel, new_captain, connect=True)
+                    try:
+                        await team_channel.set_permissions(new_captain, view_channel=True, connect=True, move_members=True)
+                    except discord.HTTPException:
+                        pass
+            bench_channel = guild.get_channel(state["bench_channel_id"])
+            if bench_channel:
+                try:
+                    await bench_channel.set_permissions(new_captain, view_channel=True, connect=True, move_members=True)
+                except discord.HTTPException:
+                    pass
+            control_channel = guild.get_channel(state["control_channel_id"])
+            if control_channel:
+                try:
+                    await control_channel.set_permissions(new_captain, view_channel=True, send_messages=True)
+                except discord.HTTPException:
+                    pass
+
+        club_name = state["teams"][team_id]["club_name"]
+        progress_channel = guild.get_channel(state["progress_channel_id"])
+        if progress_channel:
+            await progress_channel.send(f"🎖️ <@{new_captain_id}> is now captaining **{club_name}** (previously <@{old_captain_id}>).")
+        await self._refresh_team_roster(session_id)
 
     # -------------------------------------------------------------- end
     async def end_session(self, session_id, ended_by: discord.Member = None, natural_completion: bool = False):

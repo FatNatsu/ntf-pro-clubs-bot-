@@ -91,6 +91,23 @@ class StatsCog(commands.Cog):
         embed.set_footer(text=f"{total} meeting(s) as opponents (games where they were teammates don't count here)")
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(name="session_history", description="Show this server's most recent completed sessions and their winners")
+    async def session_history(self, interaction: discord.Interaction):
+        history = db.get_session_history(interaction.guild_id, limit=10)
+        if not history:
+            await interaction.response.send_message("No completed sessions recorded yet in this server.", ephemeral=True)
+            return
+
+        lines = []
+        for row in history:
+            mode_label = "🏆 League" if row["mode"] == "league" else "⚔️ Rivals"
+            date_str = (row["created_at"] or "")[:10]  # just the date portion
+            lines.append(f"{mode_label} — **{row['winning_club']}** (captain <@{row['winning_captain']}>) — {date_str}")
+
+        embed = discord.Embed(title="📜 Session History", description="\n".join(lines), color=discord.Color.blurple())
+        embed.set_footer(text="Most recent 10 completed sessions. Test sessions never appear here.")
+        await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="club_stats", description="View a club's record and best run in this server")
     async def club_stats(self, interaction: discord.Interaction, club_name: str):
         guild_id = interaction.guild_id
