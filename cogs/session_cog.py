@@ -110,12 +110,41 @@ class MatchControlView(discord.ui.View):
         self.btn_a = discord.ui.Button(label=f"{team_a_club} Win", style=discord.ButtonStyle.danger, emoji="🔴", row=0)
         self.btn_b = discord.ui.Button(label=f"{team_b_club} Win", style=discord.ButtonStyle.danger, emoji="🔴", row=0)
         self.btn_pens = discord.ui.Button(label="Went to Penalties", style=discord.ButtonStyle.secondary, emoji="⚽", row=1)
+        self.btn_live = discord.ui.Button(label="Match Live", style=discord.ButtonStyle.success, emoji="▶️", row=1)
         self.btn_a.callback = self._make_callback(team_a_id, team_a_club, team_b_id, team_b_club)
         self.btn_b.callback = self._make_callback(team_b_id, team_b_club, team_a_id, team_a_club)
         self.btn_pens.callback = self._make_pens_callback()
+        self.btn_live.callback = self._make_live_callback()
         self.add_item(self.btn_a)
         self.add_item(self.btn_b)
         self.add_item(self.btn_pens)
+        self.add_item(self.btn_live)
+
+    def _make_live_callback(self):
+        async def callback(interaction: discord.Interaction):
+            if not self.cog.is_captain_or_admin(interaction, self.session_id, {self.team_a_id, self.team_b_id}):
+                await interaction.response.send_message(
+                    "Only a captain of one of these two teams (or a server admin) can mark this match live.",
+                    ephemeral=True,
+                )
+                return
+            state = self.cog.active_sessions.get(self.session_id)
+            if not state:
+                await interaction.response.send_message("This session has ended.", ephemeral=True)
+                return
+            # Freezes both teams' CURRENT rosters for this specific match -
+            # if a sub happens after this point but before the result is
+            # reported, the sub won't count for THIS match, only future
+            # ones, since they weren't part of the frozen snapshot.
+            state["match_rosters"][self.match_id] = {
+                "team_a": set(state["teams"][self.team_a_id]["on_field"]),
+                "team_b": set(state["teams"][self.team_b_id]["on_field"]),
+            }
+            self.btn_live.disabled = True
+            self.btn_live.label = "Rosters Locked"
+            await interaction.response.edit_message(view=self)
+            await self.cog._mark_progress_field_live(self.session_id, self.match_id)
+        return callback
 
     def _make_callback(self, winner_id, winner_club, loser_id, loser_club):
         async def callback(interaction: discord.Interaction):
@@ -416,10 +445,18 @@ class SessionCog(commands.Cog):
         }
         return interaction.user.id in captain_ids
 
-    def _team_players_for_match(self, session_id, team_id):
+    def _team_players_for_match(self, session_id, team_id, match_id=None, side=None):
+        """If match_id/side are given AND that match's roster was frozen via
+        the Match Live button, uses that frozen snapshot instead of the
+        CURRENT on_field roster - this is what stops a sub who joins mid-
+        match (after it went live, before the result is reported) from
+        being credited for a game they didn't actually play from the start.
+        Falls back to the live current roster if no freeze was ever taken
+        for this match (e.g. captains didn't use the button)."""
         state = self.active_sessions[session_id]
         guild_id = state["guild_id"]
-        ids = state["teams"][team_id]["on_field"]
+        frozen = state.get("match_rosters", {}).get(match_id) if match_id is not None else None
+        ids = frozen[side] if frozen else state["teams"][team_id]["on_field"]
         players = []
         for pid in ids:
             p = db.get_player(guild_id, pid)
@@ -529,6 +566,7 @@ class SessionCog(commands.Cog):
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
             "spectate_lock": asyncio.Lock(),
             "roster_message": None,
+            "match_rosters": {},  # match_id -> {"team_a": {ids}, "team_b": {ids}} once frozen via Match Live
             "is_test": is_test,
         }
 
@@ -675,6 +713,27 @@ class SessionCog(commands.Cog):
         except (discord.HTTPException, IndexError):
             pass
 
+    async def _mark_progress_field_live(self, session_id, match_id):
+        """Updates a fixture's card in #in-progress from the generic
+        "In progress" placeholder to an explicit LIVE tag, the moment a
+        captain hits Match Live in session-control - lets spectators tell
+        which specific games are actually being played right now versus
+        ones that just haven't started yet."""
+        state = self.active_sessions.get(session_id)
+        pr = state["progress_round_message"] if state else None
+        if not pr or match_id not in pr["embed_index"]:
+            return
+        message = pr["message"]
+        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
+        try:
+            embeds = list(message.embeds)
+            fixture_embed = embeds[idx]
+            fixture_embed.description = "🔴 **LIVE**"
+            embeds[idx] = fixture_embed
+            await message.edit(embeds=embeds)
+        except (discord.HTTPException, IndexError):
+            pass
+
     # -------------------------------------------------------------- results
     async def finalize_match(self, interaction, match_id, winner_team_id, loser_team_id,
                               winner_score, loser_score, origin_view: MatchControlView, origin_message,
@@ -695,8 +754,8 @@ class SessionCog(commands.Cog):
 
         team_a_id, team_b_id = match["team_a_id"], match["team_b_id"]
         a_won = winner_team_id == team_a_id
-        team_a_players = self._team_players_for_match(session_id, team_a_id)
-        team_b_players = self._team_players_for_match(session_id, team_b_id)
+        team_a_players = self._team_players_for_match(session_id, team_a_id, match_id, "team_a")
+        team_b_players = self._team_players_for_match(session_id, team_b_id, match_id, "team_b")
 
         # Test sessions (/debug_test_session) skip every real-stat write -
         # no MMR, no win/loss counts, no match/club history - while still
@@ -727,6 +786,7 @@ class SessionCog(commands.Cog):
         # flip the control-room buttons: winner green + disabled, loser grey + disabled
         origin_view.btn_a.disabled = True
         origin_view.btn_b.disabled = True
+        origin_view.btn_live.disabled = True
         if winner_team_id == origin_view.team_a_id:
             origin_view.btn_a.style = discord.ButtonStyle.success
             origin_view.btn_a.emoji = "👑"
