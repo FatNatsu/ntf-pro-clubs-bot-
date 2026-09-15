@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     bench_channel_id        INTEGER,
     control_channel_id      INTEGER,
     progress_channel_id     INTEGER,
+    winning_team_id INTEGER,
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -133,6 +134,10 @@ def init_db():
         # column was added) - so add it here if it's missing.
         try:
             conn.execute("ALTER TABLE players ADD COLUMN is_na INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE sessions ADD COLUMN winning_team_id INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
 
@@ -393,6 +398,28 @@ def get_session(session_id):
 def end_session(session_id):
     with get_conn() as conn:
         conn.execute("UPDATE sessions SET status='ended' WHERE id=?", (session_id,))
+
+
+def set_session_winner(session_id, winning_team_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE sessions SET winning_team_id=? WHERE id=?", (winning_team_id, session_id))
+
+
+def get_session_history(guild_id, limit=10):
+    """Most recent completed sessions first, with the winning club's name
+    and captain resolved via a join - only includes sessions that actually
+    finished with a recorded winner (test sessions never set one, so they
+    won't show up here)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT s.id, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
+            "FROM sessions s "
+            "JOIN teams t ON s.winning_team_id = t.id "
+            "WHERE s.guild_id=? AND s.status='ended' "
+            "ORDER BY s.created_at DESC LIMIT ?",
+            (guild_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def create_team(session_id, club_name, captain_id=None):
