@@ -53,11 +53,6 @@ FORCE_START_MIN = {
     "rivals": 8,
 }
 
-# If League hasn't reached FORCE_START_MIN within this long, it auto-closes
-# so the channel doesn't sit clogged with a queue that's never going to pop -
-# players can immediately start a fresh Rivals queue instead.
-LEAGUE_QUEUE_TIMEOUT_SECONDS = 300  # 5 minutes
-
 # ---------------------------------------------------------------------------
 # MMR / Ranks (Elo-style)
 # ---------------------------------------------------------------------------
