@@ -517,6 +517,62 @@ def get_player_recent_form(guild_id, player_id, limit=10):
         return ["W" if r["result"] == "win" else "L" for r in rows]
 
 
+def get_player_streak(guild_id, player_id):
+    """Returns (streak_type, count) - streak_type is 'W' or 'L', count is
+    how many consecutive results of that type the player currently has,
+    walking back from their most recent match. Returns (None, 0) if they
+    have no match history at all."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? ORDER BY id DESC",
+            (guild_id, player_id),
+        ).fetchall()
+    if not rows:
+        return None, 0
+    current_result = rows[0]["result"]
+    count = 0
+    for r in rows:
+        if r["result"] == current_result:
+            count += 1
+        else:
+            break
+    return ("W" if current_result == "win" else "L"), count
+
+
+def get_head_to_head(guild_id, player_a_id, player_b_id):
+    """Returns (a_wins, b_wins, total_meetings) counting only matches where
+    these two players were on OPPOSING teams (teammate matches don't count
+    as a head-to-head result for either of them)."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT mp_a.result AS a_result "
+            "FROM match_participants mp_a "
+            "JOIN match_participants mp_b "
+            "  ON mp_a.match_id = mp_b.match_id AND mp_a.team_id != mp_b.team_id "
+            "WHERE mp_a.guild_id=? AND mp_a.player_id=? AND mp_b.player_id=?",
+            (guild_id, player_a_id, player_b_id),
+        ).fetchall()
+    a_wins = sum(1 for r in rows if r["a_result"] == "win")
+    b_wins = sum(1 for r in rows if r["a_result"] == "loss")
+    return a_wins, b_wins, len(rows)
+
+
+def prune_left_members(guild_id: int, active_discord_ids: set):
+    """Removes any tracked player from this guild who is no longer an
+    actual member of the server (left, kicked, banned) - active_discord_ids
+    is the current real member list, fetched fresh from Discord by the
+    caller. Only deletes the players row itself; match/club history stays
+    intact for reference (the same "keep history, only clear standings"
+    principle as /season_reset). Returns how many were removed."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT discord_id FROM players WHERE guild_id=?", (guild_id,)).fetchall()
+        tracked_ids = {r["discord_id"] for r in rows}
+        to_remove = tracked_ids - active_discord_ids
+        for discord_id in to_remove:
+            conn.execute("DELETE FROM players WHERE guild_id=? AND discord_id=?", (guild_id, discord_id))
+        return len(to_remove)
+
+
 def get_player_record(guild_id, player_id):
     with get_conn() as conn:
         row = conn.execute(
