@@ -151,6 +151,78 @@ class MatchControlView(discord.ui.View):
         return callback
 
 
+class TransferDestinationView(discord.ui.View):
+    """Second step of a manual transfer - pick which team to move the
+    already-selected player onto."""
+
+    def __init__(self, cog: "SessionCog", session_id, player_id: int, player_label: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        self.player_id = player_id
+        state = cog.active_sessions[session_id]
+        options = [
+            discord.SelectOption(label=info["club_name"], value=str(team_id))
+            for team_id, info in state["teams"].items()
+        ]
+        select = discord.ui.Select(placeholder=f"Move {player_label} to which team?", options=options[:25])
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        dest_team_id = int(interaction.data["values"][0])
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.followup.send("This session has ended.", ephemeral=True)
+            return
+        added, moved, reason = await self.cog.transfer_player(interaction.guild, self.session_id, state, self.player_id, dest_team_id)
+        club_name = state["teams"][dest_team_id]["club_name"]
+        if not added:
+            await interaction.followup.send(f"❌ Transfer blocked: {reason}.", ephemeral=True)
+        elif moved:
+            await interaction.followup.send(f"Moved <@{self.player_id}> onto {club_name}.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"<@{self.player_id}> is now on {club_name}'s roster, but couldn't be physically dragged there: {reason}.",
+                ephemeral=True,
+            )
+
+
+class TransferPlayerSelectView(discord.ui.View):
+    """First step of a manual transfer - pick which currently-rostered
+    player to move. Only lists players actively on a team, not fake/test
+    accounts or people the bot can't resolve to a real member."""
+
+    def __init__(self, cog: "SessionCog", session_id):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        state = cog.active_sessions[session_id]
+
+        options = []
+        for team_id, info in state["teams"].items():
+            for pid in info["on_field"]:
+                member = cog.bot.get_user(pid)
+                label = member.display_name if member else str(pid)
+                options.append(discord.SelectOption(label=f"{label} ({info['club_name']})", value=str(pid)))
+
+        if options:
+            select = discord.ui.Select(placeholder="Which player do you want to transfer?", options=options[:25])
+            select.callback = self._on_select
+            self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        player_id = int(interaction.data["values"][0])
+        member = interaction.guild.get_member(player_id)
+        label = member.display_name if member else str(player_id)
+        await interaction.response.send_message(
+            f"Transfer **{label}** to which team?",
+            view=TransferDestinationView(self.cog, self.session_id, player_id, label),
+            ephemeral=True,
+        )
+
+
 class SessionControlPanelView(discord.ui.View):
     """Persistent-for-the-session sub + end controls, in session-control."""
 
@@ -166,6 +238,10 @@ class SessionControlPanelView(discord.ui.View):
             btn.callback = self._make_sub_callback(team_id, info["club_name"])
             self.add_item(btn)
 
+        transfer_btn = discord.ui.Button(label="Transfer Player", style=discord.ButtonStyle.primary, emoji="🔄")
+        transfer_btn.callback = self._transfer_callback
+        self.add_item(transfer_btn)
+
         end_btn = discord.ui.Button(label="End Session", style=discord.ButtonStyle.danger, emoji="🛑")
         end_btn.callback = self._end_callback
         self.add_item(end_btn)
@@ -174,6 +250,24 @@ class SessionControlPanelView(discord.ui.View):
         async def callback(interaction: discord.Interaction):
             await self.cog.request_sub(interaction, self.session_id, team_id, club_name)
         return callback
+
+    async def _transfer_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only an admin can manually transfer a player between teams — a captain can still use "
+                "Add Sub for their own team.",
+                ephemeral=True,
+            )
+            return
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        view = TransferPlayerSelectView(self.cog, self.session_id)
+        if not view.children:
+            await interaction.response.send_message("Nobody is currently rostered to transfer.", ephemeral=True)
+            return
+        await interaction.response.send_message("Who do you want to transfer?", view=view, ephemeral=True)
 
     async def _end_callback(self, interaction: discord.Interaction):
         state = self.cog.active_sessions.get(self.session_id)
@@ -792,6 +886,15 @@ class SessionCog(commands.Cog):
             await interaction.followup.send(f"Only {club_name}'s captain can request a sub.", ephemeral=True)
             return
 
+        # Hard cap: a team can take exactly ONE sub beyond the normal 6
+        # (7 max) - never more, no matter how many times Add Sub is clicked.
+        if len(state["teams"][team_id]["on_field"]) >= config.TEAM_SIZE + 1:
+            await interaction.followup.send(
+                f"{club_name} is already at its maximum of {config.TEAM_SIZE + 1} players — it's already used its one sub slot.",
+                ephemeral=True,
+            )
+            return
+
         async with state["sub_lock"]:
             # re-fetch state in case the session ended while we were waiting on the lock
             state = self.active_sessions.get(session_id)
@@ -892,6 +995,17 @@ class SessionCog(commands.Cog):
             await voice_utils.allow_member_in_channel(team_channel, incoming, connect=True)
             moved, move_fail_reason = await voice_utils.move_member_to_channel(guild, incoming.id, team_channel)
 
+            # Bench's extra capacity (if any) was only ever reserved to cover
+            # a force-start deficiency - now that this seat's been used to
+            # pull someone onto a team, give it back, same as any other
+            # capacity-neutral transfer. Never shrinks below the normal
+            # BENCH_SIZE floor.
+            if bench_channel and bench_channel.user_limit > config.BENCH_SIZE:
+                try:
+                    await bench_channel.edit(user_limit=bench_channel.user_limit - 1)
+                except discord.HTTPException:
+                    pass
+
             state["teams"][team_id]["on_field"].add(incoming.id)
             db.add_team_member(team_id, incoming.id, "player")
 
@@ -915,6 +1029,67 @@ class SessionCog(commands.Cog):
                 f"them manually.",
                 ephemeral=True,
             )
+
+    # -------------------------------------------------------------- manual transfer
+    async def transfer_player(self, guild: discord.Guild, session_id: int, state: dict, player_id: int, dest_team_id: int):
+        """Moves player_id directly onto dest_team_id's roster, removing
+        them from wherever they're currently rostered (if anywhere) first.
+        Unlike request_sub, this doesn't require them to be on the Bench -
+        it's for the case where a player is already active on one team but
+        needs to move straight onto a different one. Shares the same
+        capacity-neutral VC math and Bench-lock enforcement as a sub.
+        Returns (added: bool, moved: bool, reason: str | None) - added is
+        False only if the hard cap blocked the transfer entirely (nothing
+        changed); moved reflects whether the physical voice drag succeeded
+        given the roster change did go through."""
+        # Same hard cap as Add Sub - a team can hold at most one sub beyond
+        # the normal 6 (7 max). Check this BEFORE touching anything, so a
+        # blocked transfer doesn't still rip the player off their old team.
+        if len(state["teams"][dest_team_id]["on_field"]) >= config.TEAM_SIZE + 1:
+            dest_club = state["teams"][dest_team_id]["club_name"]
+            return False, False, f"{dest_club} is already at its maximum of {config.TEAM_SIZE + 1} players"
+
+        # remove from any other team they're currently on, shrinking that
+        # team's VC back down (never below the normal TEAM_SIZE floor)
+        for other_team_id, other_info in state["teams"].items():
+            if other_team_id != dest_team_id and player_id in other_info["on_field"]:
+                other_info["on_field"].discard(player_id)
+                db.set_member_role(other_team_id, player_id, "sub")
+                other_channel = guild.get_channel(other_info["voice_channel_id"])
+                if other_channel and other_channel.user_limit > config.TEAM_SIZE:
+                    try:
+                        await other_channel.edit(user_limit=other_channel.user_limit - 1)
+                    except discord.HTTPException:
+                        pass
+                break
+
+        dest_channel = guild.get_channel(state["teams"][dest_team_id]["voice_channel_id"])
+        try:
+            await dest_channel.edit(user_limit=dest_channel.user_limit + 1)
+        except discord.HTTPException:
+            pass
+
+        member = guild.get_member(player_id)
+        moved, reason = False, "that user isn't in the bot's member cache for this server"
+        if member:
+            await voice_utils.allow_member_in_channel(dest_channel, member, connect=True)
+            moved, reason = await voice_utils.move_member_to_channel(guild, player_id, dest_channel)
+
+        state["teams"][dest_team_id]["on_field"].add(player_id)
+        db.add_team_member(dest_team_id, player_id, "player")
+
+        # lock them out of Bench now that they're rostered on their new team
+        bench_channel = guild.get_channel(state["bench_channel_id"])
+        if bench_channel and member:
+            await voice_utils.allow_member_in_channel(bench_channel, member, connect=False)
+
+        club_name = state["teams"][dest_team_id]["club_name"]
+        progress_channel = guild.get_channel(state["progress_channel_id"])
+        if progress_channel:
+            await progress_channel.send(f"🔄 <@{player_id}> has been transferred to **{club_name}**.")
+        await self._refresh_team_roster(session_id)
+
+        return True, moved, reason
 
     # -------------------------------------------------------------- end
     async def end_session(self, session_id, ended_by: discord.Member = None, natural_completion: bool = False):
