@@ -267,7 +267,10 @@ class ReassignCaptainTeamSelectView(discord.ui.View):
         self.session_id = session_id
         state = cog.active_sessions[session_id]
         options = [
-            discord.SelectOption(label=f"{info['club_name']} (captain: {cog.bot.get_user(info['captain_id']).display_name if cog.bot.get_user(info['captain_id']) else info['captain_id']})", value=str(team_id))
+            discord.SelectOption(
+                label=f"{info['club_name']} (captain: {cog.bot.get_user(info['captain_id']).display_name if info['captain_id'] and cog.bot.get_user(info['captain_id']) else 'none assigned'})",
+                value=str(team_id),
+            )
             for team_id, info in state["teams"].items()
         ]
         select = discord.ui.Select(placeholder="Which team needs a new captain?", options=options[:25])
@@ -484,6 +487,15 @@ class SpectateView(discord.ui.View):
             else:
                 await interaction.followup.send(f"Couldn't move you — {reason}.", ephemeral=True)
         return callback
+
+
+def _captain_display(captain_id):
+    """Renders a team's captain as a mention, or a clear placeholder if
+    that team's captaincy was stripped (e.g. after a captain transferred
+    away) and hasn't been reassigned yet."""
+    if captain_id is None:
+        return "⚠️ *No captain assigned — use Reassign Captain*"
+    return f"<@{captain_id}>"
 
 
 class SessionCog(commands.Cog):
@@ -740,7 +752,7 @@ class SessionCog(commands.Cog):
             avg_mmr = round(sum(mmrs) / len(mmrs)) if mmrs else 0
             embed.add_field(
                 name=info["club_name"],
-                value=f"Captain: <@{info['captain_id']}>\nPlayers: {len(mmrs)}\nAvg MMR: {avg_mmr}",
+                value=f"Captain: {_captain_display(info['captain_id'])}\nPlayers: {len(mmrs)}\nAvg MMR: {avg_mmr}",
                 inline=True,
             )
         embed.set_footer(text="Report results below. Only captains and admins can click.")
@@ -753,7 +765,7 @@ class SessionCog(commands.Cog):
             member_lines = "\n".join(f"• <@{pid}>" for pid in info["on_field"]) or "*empty*"
             embed.add_field(
                 name=info["club_name"],
-                value=f"**Captain:** <@{info['captain_id']}>\n{member_lines}",
+                value=f"**Captain:** {_captain_display(info['captain_id'])}\n{member_lines}",
                 inline=True,
             )
         return embed
@@ -1282,6 +1294,7 @@ class SessionCog(commands.Cog):
 
         # remove from any other team they're currently on, shrinking that
         # team's VC back down (never below the normal TEAM_SIZE floor)
+        stripped_captaincy_of = None
         for other_team_id, other_info in state["teams"].items():
             if other_team_id != dest_team_id and player_id in other_info["on_field"]:
                 other_info["on_field"].discard(player_id)
@@ -1292,6 +1305,18 @@ class SessionCog(commands.Cog):
                         await other_channel.edit(user_limit=other_channel.user_limit - 1)
                     except discord.HTTPException:
                         pass
+
+                # A captain who transfers away loses that team's captaincy -
+                # they're no longer even rostered there, so it shouldn't
+                # stay pointed at them. Admins are exempt: they already see
+                # and can act on session-control regardless of captain
+                # status, so there's nothing to strip for them functionally.
+                if other_info["captain_id"] == player_id:
+                    transferred_member = guild.get_member(player_id)
+                    is_admin_player = bool(transferred_member and transferred_member.guild_permissions.manage_guild)
+                    if not is_admin_player:
+                        other_info["captain_id"] = None
+                        stripped_captaincy_of = other_info["club_name"]
                 break
 
         dest_channel = guild.get_channel(state["teams"][dest_team_id]["voice_channel_id"])
@@ -1317,7 +1342,8 @@ class SessionCog(commands.Cog):
         club_name = state["teams"][dest_team_id]["club_name"]
         progress_channel = guild.get_channel(state["progress_channel_id"])
         if progress_channel:
-            await progress_channel.send(f"🔄 <@{player_id}> has been transferred to **{club_name}**.")
+            note = f" ⚠️ They were {stripped_captaincy_of}'s captain — that team needs a new one via Reassign Captain." if stripped_captaincy_of else ""
+            await progress_channel.send(f"🔄 <@{player_id}> has been transferred to **{club_name}**.{note}")
         await self._refresh_team_roster(session_id)
 
         return True, moved, reason
@@ -1390,7 +1416,7 @@ class SessionCog(commands.Cog):
             announce_channel = guild.get_channel(state["announce_channel_id"])
             if announce_channel:
                 who = ended_by.mention if ended_by else "the system"
-                lines = [f"**{info['club_name']}** — Captain <@{info['captain_id']}>" for info in state["teams"].values()]
+                lines = [f"**{info['club_name']}** — Captain {_captain_display(info['captain_id'])}" for info in state["teams"].values()]
                 await announce_channel.send(f"🔴 **NTF session ended** by {who}.\n" + "\n".join(lines))
 
         # Voice infrastructure disappears right away either way - that's the
