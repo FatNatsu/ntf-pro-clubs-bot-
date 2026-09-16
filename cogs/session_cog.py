@@ -582,13 +582,33 @@ class SessionCog(commands.Cog):
         category = await voice_utils.create_session_category(guild, session_id, mode)
         progress_channel = await self._get_or_create_progress_channel(guild)
 
+        # All the channels this session needs are independent of each other
+        # (different channels, no shared state) - create them all at once
+        # instead of one-by-one, so the wall-clock time is roughly "however
+        # long the single slowest channel creation takes" rather than the
+        # sum of every one of them in sequence. This is the single biggest
+        # lever on how long a session takes to actually spin up.
+        team_channel_tasks = [
+            voice_utils.create_team_voice_channel(guild, category, club_names[i], [m["discord_id"] for m in built_team["members"]], captain_ids)
+            for i, built_team in enumerate(built)
+        ]
+        bench_channel_task = voice_utils.create_bench_channel(guild, category, captain_ids, bench_limit=bench_limit)
+        control_channel_task = voice_utils.create_control_channel(guild, category, captain_ids)
+        channel_results = await asyncio.gather(*team_channel_tasks, bench_channel_task, control_channel_task)
+        team_channels = channel_results[:num_teams]
+        bench_channel = channel_results[num_teams]
+        control_channel = channel_results[num_teams + 1]
+
         teams_state = {}
         db_team_ids = []
         failed_moves = []  # (discord_id, intended_club_or_bench, reason) - reported to players after seating
+        move_tasks = []
+        move_task_meta = []  # (pid, club_name) in the same order as move_tasks, so results line back up
         for i, built_team in enumerate(built):
             club_name = club_names[i]
             captain = built_team["captain"]
             member_ids = [m["discord_id"] for m in built_team["members"]]
+            channel = team_channels[i]
 
             team_id = db.create_team(session_id, club_name, captain_id=captain["discord_id"])
             db_team_ids.append(team_id)
@@ -596,14 +616,12 @@ class SessionCog(commands.Cog):
             # channel is always created at the full config.TEAM_SIZE cap, even
             # if we're only seating `initial_team_size` right now - that way
             # subs pulled in later from the bench have somewhere to go.
-            channel = await voice_utils.create_team_voice_channel(guild, category, club_name, member_ids, captain_ids)
             db.set_team_voice_channel(team_id, channel.id)
 
             for pid in member_ids:
                 db.add_team_member(team_id, pid, role="player")
-                moved, reason = await voice_utils.move_member_to_channel(guild, pid, channel)
-                if not moved:
-                    failed_moves.append((pid, club_name, reason))
+                move_tasks.append(voice_utils.move_member_to_channel(guild, pid, channel))
+                move_task_meta.append((pid, club_name))
 
             teams_state[team_id] = {
                 "club_name": club_name,
@@ -613,19 +631,29 @@ class SessionCog(commands.Cog):
             }
             built_team["_team_id"] = team_id  # stash for the bench pass below
 
-        bench_channel = await voice_utils.create_bench_channel(guild, category, captain_ids, bench_limit=bench_limit)
-        control_channel = await voice_utils.create_control_channel(guild, category, captain_ids)
+        # Moving every player into their team's VC is likewise independent
+        # per-player - one slow or rate-limited move no longer holds up
+        # every move behind it in line.
+        if move_tasks:
+            move_results = await asyncio.gather(*move_tasks)
+            for (pid, club_name), (moved, reason) in zip(move_task_meta, move_results):
+                if not moved:
+                    failed_moves.append((pid, club_name, reason))
 
         # Once someone is seated on a team's roster, they can no longer
         # voluntarily sit in Bench and get poached by another team's sub
         # request - lock them out of Bench specifically. This does NOT
         # apply to genuine bench-only overflow players (handled separately
         # below), who are meant to be there.
+        bench_lock_tasks = []
         for info in teams_state.values():
             for pid in info["on_field"]:
                 member = guild.get_member(pid)
                 if member:
-                    await voice_utils.allow_member_in_channel(bench_channel, member, connect=False)
+                    bench_lock_tasks.append(voice_utils.allow_member_in_channel(bench_channel, member, connect=False))
+        if bench_lock_tasks:
+            await asyncio.gather(*bench_lock_tasks)
+
         db.set_session_channels(
             session_id, category_id=category.id, bench_id=bench_channel.id,
             control_id=control_channel.id, progress_id=progress_channel.id,
@@ -633,11 +661,17 @@ class SessionCog(commands.Cog):
 
         # anyone drafted beyond initial_team_size (only happens if actual_count
         # isn't evenly divisible by num_teams) starts the session on the bench
+        bench_move_tasks = []
+        bench_move_meta = []
         for built_team in built:
             for bench_player in built_team["bench"]:
                 pid = bench_player["discord_id"]
                 db.add_team_member(built_team["_team_id"], pid, role="sub")
-                moved, reason = await voice_utils.move_member_to_channel(guild, pid, bench_channel)
+                bench_move_tasks.append(voice_utils.move_member_to_channel(guild, pid, bench_channel))
+                bench_move_meta.append(pid)
+        if bench_move_tasks:
+            bench_move_results = await asyncio.gather(*bench_move_tasks)
+            for pid, (moved, reason) in zip(bench_move_meta, bench_move_results):
                 if not moved:
                     failed_moves.append((pid, "Bench", reason))
 
