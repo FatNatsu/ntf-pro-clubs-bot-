@@ -340,7 +340,8 @@ class QueueCog(commands.Cog):
         for pid in player_ids:
             p = db.get_player(guild.id, pid)
             if p:
-                players.append(p)
+                mode_stats = db.get_player_mode_stats(guild.id, pid, mode)
+                players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
 
         session_cog = self.bot.get_cog("SessionCog")
         old_message = self._reset_mode_state(guild.id, mode)

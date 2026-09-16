@@ -6,24 +6,27 @@ from typing import Literal
 import config
 import database as db
 import mmr
+import mmr as mmr_module  # alias used specifically where a local variable/param would shadow the plain `mmr` name
 import voice_utils
 import leaderboard_utils
 
 
 class ConfirmSeasonResetView(discord.ui.View):
-    def __init__(self, bot, guild_id: int):
+    def __init__(self, bot, guild_id: int, mode: str):
         super().__init__(timeout=30)
         self.bot = bot
         self.guild_id = guild_id
+        self.mode = mode
 
     @discord.ui.button(label="Yes, reset the season", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        db.reset_leaderboard(self.guild_id)
+        db.reset_mode_leaderboard(self.guild_id, self.mode)
         clubs_reset = db.reset_club_records(self.guild_id)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.edit_message(
-            content=f"✅ Season reset — every player is back to {config.STARTING_MMR} MMR with a clean record, "
-                    f"and {clubs_reset} club result(s) were cleared too.",
+            content=f"✅ **{self.mode.title()}** season reset — every player's {self.mode} MMR is back to "
+                    f"{config.STARTING_MMR} with a clean record, and {clubs_reset} club result(s) were cleared too "
+                    f"(club records aren't split by mode). Run this again for the other mode if you want that reset too.",
             view=None,
         )
 
@@ -64,11 +67,16 @@ class AdminCog(commands.Cog):
         if leaderboard_channel is None:
             leaderboard_channel = await voice_utils.create_leaderboard_channel(guild)
 
+        history_channel = guild.get_channel(cfg.get("history_channel_id")) if cfg.get("history_channel_id") else None
+        if history_channel is None:
+            history_channel = await voice_utils.create_history_channel(guild)
+
         db.upsert_guild_config(
             guild.id,
             queue_channel_id=queue_channel.id,
             progress_channel_id=progress_channel.id,
             leaderboard_channel_id=leaderboard_channel.id,
+            history_channel_id=history_channel.id,
         )
 
         if queue_channel_is_new:
@@ -81,8 +89,8 @@ class AdminCog(commands.Cog):
 
         await interaction.response.send_message(
             f"✅ NTF is set up for this server — {queue_channel.mention}, {progress_channel.mention}, "
-            f"and {leaderboard_channel.mention} are ready. These (and your clubs/captains/leaderboard) "
-            f"are separate per server, so other servers NTF is in won't see this data.",
+            f"{leaderboard_channel.mention}, and {history_channel.mention} are ready. These (and your "
+            f"clubs/captains/leaderboard) are separate per server, so other servers NTF is in won't see this data.",
             ephemeral=True,
         )
 
@@ -147,7 +155,11 @@ class AdminCog(commands.Cog):
         if not caps:
             await interaction.response.send_message("No captains whitelisted yet in this server.", ephemeral=True)
             return
-        lines = [f"• <@{c['discord_id']}> (MMR {c['mmr']})" for c in caps]
+        lines = []
+        for c in caps:
+            rivals_mmr = db.get_player_mode_stats(interaction.guild_id, c["discord_id"], "rivals")["mmr"]
+            league_mmr = db.get_player_mode_stats(interaction.guild_id, c["discord_id"], "league")["mmr"]
+            lines.append(f"• <@{c['discord_id']}> (Rivals {rivals_mmr} / League {league_mmr})")
         await interaction.response.send_message("🎖️ **Captain whitelist:**\n" + "\n".join(lines), ephemeral=True)
 
     # ---------------------------------------------------------------- NA whitelist
@@ -174,90 +186,90 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message("🌎 **NA whitelist:**\n" + "\n".join(lines), ephemeral=True)
 
     # ---------------------------------------------------------------- overrides
-    @app_commands.command(name="admin_fix_mmr", description="Manually set a player's MMR in this server (corrections only)")
+    @app_commands.command(name="admin_fix_mmr", description="Manually set a player's MMR in one mode in this server (corrections only)")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def admin_fix_mmr(self, interaction: discord.Interaction, member: discord.Member, mmr: int):
+    async def admin_fix_mmr(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], mmr: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        db.set_mmr(interaction.guild_id, member.id, mmr)
-        await interaction.response.send_message(f"Set {member.mention}'s MMR to {mmr}.", ephemeral=True)
+        db.set_mode_mmr(interaction.guild_id, member.id, mode, mmr)
+        await interaction.response.send_message(f"Set {member.mention}'s **{mode}** MMR to {mmr}.", ephemeral=True)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
 
-    @app_commands.command(name="add_wins", description="[Admin] Add wins to a player's record, adjusting their MMR to match")
+    @app_commands.command(name="add_wins", description="[Admin] Add wins to a player's record in one mode, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def add_wins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+    async def add_wins(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        p = db.get_player(interaction.guild_id, member.id)
-        old_mmr = p["mmr"] if p else config.STARTING_MMR
-        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "win", +1)
-        db.set_mmr(interaction.guild_id, member.id, new_mmr)
-        new_wins = db.add_wins(interaction.guild_id, member.id, amount)
+        stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
+        old_mmr = stats["mmr"]
+        new_mmr = mmr_module.simulate_correction(old_mmr, abs(amount), "win", +1)
+        db.set_mode_mmr(interaction.guild_id, member.id, mode, new_mmr)
+        new_wins = db.add_mode_wins(interaction.guild_id, member.id, mode, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
-            f"➕ Added {abs(amount)} win(s) to {member.mention}. New win count: **{new_wins}**. "
-            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
+            f"➕ Added {abs(amount)} **{mode}** win(s) to {member.mention}. New win count: **{new_wins}**. "
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr_module.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="add_losses", description="[Admin] Add losses to a player's record, adjusting their MMR to match")
+    @app_commands.command(name="add_losses", description="[Admin] Add losses to a player's record in one mode, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def add_losses(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+    async def add_losses(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        p = db.get_player(interaction.guild_id, member.id)
-        old_mmr = p["mmr"] if p else config.STARTING_MMR
-        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "loss", -1)
-        db.set_mmr(interaction.guild_id, member.id, new_mmr)
-        new_losses = db.add_losses(interaction.guild_id, member.id, amount)
+        stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
+        old_mmr = stats["mmr"]
+        new_mmr = mmr_module.simulate_correction(old_mmr, abs(amount), "loss", -1)
+        db.set_mode_mmr(interaction.guild_id, member.id, mode, new_mmr)
+        new_losses = db.add_mode_losses(interaction.guild_id, member.id, mode, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
-            f"➕ Added {abs(amount)} loss(es) to {member.mention}. New loss count: **{new_losses}**. "
-            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
+            f"➕ Added {abs(amount)} **{mode}** loss(es) to {member.mention}. New loss count: **{new_losses}**. "
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr_module.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="deduct_wins", description="[Admin] Deduct wins from a player's record, adjusting their MMR to match")
+    @app_commands.command(name="deduct_wins", description="[Admin] Deduct wins from a player's record in one mode, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def deduct_wins(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+    async def deduct_wins(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        p = db.get_player(interaction.guild_id, member.id)
-        old_mmr = p["mmr"] if p else config.STARTING_MMR
-        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "win", -1)
-        db.set_mmr(interaction.guild_id, member.id, new_mmr)
-        new_wins = db.deduct_wins(interaction.guild_id, member.id, amount)
+        stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
+        old_mmr = stats["mmr"]
+        new_mmr = mmr_module.simulate_correction(old_mmr, abs(amount), "win", -1)
+        db.set_mode_mmr(interaction.guild_id, member.id, mode, new_mmr)
+        new_wins = db.deduct_mode_wins(interaction.guild_id, member.id, mode, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
-            f"➖ Deducted {abs(amount)} win(s) from {member.mention}. New win count: **{new_wins}**. "
-            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
+            f"➖ Deducted {abs(amount)} **{mode}** win(s) from {member.mention}. New win count: **{new_wins}**. "
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr_module.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="deduct_losses", description="[Admin] Deduct losses from a player's record, adjusting their MMR to match")
+    @app_commands.command(name="deduct_losses", description="[Admin] Deduct losses from a player's record in one mode, adjusting their MMR to match")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def deduct_losses(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+    async def deduct_losses(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        p = db.get_player(interaction.guild_id, member.id)
-        old_mmr = p["mmr"] if p else config.STARTING_MMR
-        new_mmr = mmr.simulate_correction(old_mmr, abs(amount), "loss", +1)
-        db.set_mmr(interaction.guild_id, member.id, new_mmr)
-        new_losses = db.deduct_losses(interaction.guild_id, member.id, amount)
+        stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
+        old_mmr = stats["mmr"]
+        new_mmr = mmr_module.simulate_correction(old_mmr, abs(amount), "loss", +1)
+        db.set_mode_mmr(interaction.guild_id, member.id, mode, new_mmr)
+        new_losses = db.deduct_mode_losses(interaction.guild_id, member.id, mode, amount)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
-            f"➖ Deducted {abs(amount)} loss(es) from {member.mention}. New loss count: **{new_losses}**. "
-            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr.rank_for_mmr(new_mmr)}) to match.",
+            f"➖ Deducted {abs(amount)} **{mode}** loss(es) from {member.mention}. New loss count: **{new_losses}**. "
+            f"MMR adjusted {old_mmr} → **{new_mmr}** ({mmr_module.rank_for_mmr(new_mmr)}) to match.",
             ephemeral=True,
         )
 
-    @app_commands.command(name="deduct_mmr", description="[Admin] Deduct a set amount of MMR from a player (e.g. for a ban)")
+    @app_commands.command(name="deduct_mmr", description="[Admin] Deduct a set amount of MMR from a player in one mode (e.g. for a ban)")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def deduct_mmr(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+    async def deduct_mmr(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], amount: int):
         db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        p = db.get_player(interaction.guild_id, member.id)
-        current = p["mmr"] if p else config.STARTING_MMR
+        stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
+        current = stats["mmr"]
         new_mmr = max(0, current - abs(amount))
-        db.set_mmr(interaction.guild_id, member.id, new_mmr)
+        db.set_mode_mmr(interaction.guild_id, member.id, mode, new_mmr)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.send_message(
-            f"➖ Deducted {abs(amount)} MMR from {member.mention}. New MMR: **{new_mmr}** "
-            f"({mmr.rank_for_mmr(new_mmr)}).",
+            f"➖ Deducted {abs(amount)} **{mode}** MMR from {member.mention}. New MMR: **{new_mmr}** "
+            f"({mmr_module.rank_for_mmr(new_mmr)}).",
             ephemeral=True,
         )
 
@@ -273,9 +285,11 @@ class AdminCog(commands.Cog):
             if db.get_player(guild.id, member.id) is None:
                 db.ensure_player(guild.id, member.id, member.display_name)
                 added += 1
+            db.ensure_player_mode_stats(guild.id, member.id, "rivals")
+            db.ensure_player_mode_stats(guild.id, member.id, "league")
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
         await interaction.followup.send(
-            f"✅ Added {added} new member(s) to the leaderboard at {config.STARTING_MMR} MMR. "
+            f"✅ Added {added} new member(s) to both leaderboards at {config.STARTING_MMR} MMR. "
             f"Everyone else was already tracked.",
             ephemeral=True,
         )
@@ -289,22 +303,24 @@ class AdminCog(commands.Cog):
         async for member in guild.fetch_members(limit=None):
             active_ids.add(member.id)
         removed = db.prune_left_members(guild.id, active_ids)
+        db.prune_left_members_mode_stats(guild.id, active_ids)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
         await interaction.followup.send(
             f"🧹 Removed {removed} player(s) who are no longer in this server. Their match/club history "
-            f"stays intact for reference — only their leaderboard entry was cleared.",
+            f"stays intact for reference — only their leaderboard entries (both modes) were cleared.",
             ephemeral=True,
         )
 
     @app_commands.command(name="season_reset", description="[Admin] Reset every player's MMR and W-L back to the start for a new season")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def season_reset(self, interaction: discord.Interaction):
+    async def season_reset(self, interaction: discord.Interaction, mode: Literal["rivals", "league"]):
         await interaction.response.send_message(
-            f"⚠️ This resets **every player** in this server back to {config.STARTING_MMR} MMR with a clean "
-            f"win/loss record, AND wipes every **club's** win/loss record too. Player match history "
+            f"⚠️ This resets **every player's {mode} MMR** in this server back to {config.STARTING_MMR} with a "
+            f"clean win/loss record for {mode} specifically (the other mode is untouched), AND wipes every "
+            f"**club's** win/loss record too (club records aren't split by mode). Player match history "
             f"(recent form, best club, most-played-with) stays intact — only current standings reset, not "
             f"the historical log. This can't be undone. Continue?",
-            view=ConfirmSeasonResetView(self.bot, interaction.guild_id),
+            view=ConfirmSeasonResetView(self.bot, interaction.guild_id, mode),
             ephemeral=True,
         )
 
@@ -367,8 +383,12 @@ class AdminCog(commands.Cog):
         for i, fid in enumerate(fake_ids, start=1):
             db.ensure_player(guild_id, fid, f"🤖 Test Bot {i}")
 
-        players = [db.get_player(guild_id, pid) for pid in real_ids + fake_ids]
-        players = [p for p in players if p]
+        players = []
+        for pid in real_ids + fake_ids:
+            p = db.get_player(guild_id, pid)
+            if p:
+                mode_stats = db.get_player_mode_stats(guild_id, pid, mode)
+                players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
 
         # Force the second tester to be treated as captain-eligible for the
         # draft - this is an in-memory-only override on the player dict

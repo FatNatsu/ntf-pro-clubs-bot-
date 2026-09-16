@@ -1,3 +1,5 @@
+from typing import Literal, Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -33,6 +35,8 @@ class StatsCog(commands.Cog):
         guild_id = interaction.guild_id
         db.ensure_player(guild_id, member.id, member.display_name)
         p = db.get_player(guild_id, member.id)
+        rivals_stats = db.get_player_mode_stats(guild_id, member.id, "rivals")
+        league_stats = db.get_player_mode_stats(guild_id, member.id, "league")
         form = db.get_player_recent_form(guild_id, member.id, limit=10)
         streak_type, streak_count = db.get_player_streak(guild_id, member.id)
         best_club = db.get_player_best_club(guild_id, member.id)
@@ -45,11 +49,19 @@ class StatsCog(commands.Cog):
         if member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
 
-        embed.add_field(name="Rank", value=f"**{mmr.rank_for_mmr(p['mmr'])}**  ({p['mmr']} MMR)", inline=True)
-        embed.add_field(name="Overall Record", value=f"{p['wins']}W - {p['losses']}L", inline=True)
+        embed.add_field(
+            name="⚔️ Rivals",
+            value=f"**{mmr.rank_for_mmr(rivals_stats['mmr'])}** — {rivals_stats['mmr']} MMR\n{rivals_stats['wins']}W - {rivals_stats['losses']}L",
+            inline=True,
+        )
+        embed.add_field(
+            name="🏆 League",
+            value=f"**{mmr.rank_for_mmr(league_stats['mmr'])}** — {league_stats['mmr']} MMR\n{league_stats['wins']}W - {league_stats['losses']}L",
+            inline=True,
+        )
         embed.add_field(name="Current Streak", value=_streak_string(streak_type, streak_count), inline=True)
 
-        embed.add_field(name="Recent Form (last 10)", value=_form_string(form), inline=False)
+        embed.add_field(name="Recent Form (last 10, both modes)", value=_form_string(form), inline=False)
 
         if best_club:
             embed.add_field(name="Best Club", value=f"**{best_club['club_name']}** ({best_club['wins']} wins)", inline=True)
@@ -91,11 +103,12 @@ class StatsCog(commands.Cog):
         embed.set_footer(text=f"{total} meeting(s) as opponents (games where they were teammates don't count here)")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="session_history", description="Show this server's most recent completed sessions and their winners")
-    async def session_history(self, interaction: discord.Interaction):
-        history = db.get_session_history(interaction.guild_id, limit=10)
+    @app_commands.command(name="session_history", description="Show recent completed sessions and their winners, optionally filtered to one mode")
+    async def session_history(self, interaction: discord.Interaction, mode: Optional[Literal["rivals", "league"]] = None):
+        history = db.get_session_history(interaction.guild_id, limit=10, mode=mode)
         if not history:
-            await interaction.response.send_message("No completed sessions recorded yet in this server.", ephemeral=True)
+            scope = f"{mode} " if mode else ""
+            await interaction.response.send_message(f"No completed {scope}sessions recorded yet in this server.", ephemeral=True)
             return
 
         lines = []
@@ -104,7 +117,8 @@ class StatsCog(commands.Cog):
             date_str = (row["created_at"] or "")[:10]  # just the date portion
             lines.append(f"{mode_label} — **{row['winning_club']}** (captain <@{row['winning_captain']}>) — {date_str}")
 
-        embed = discord.Embed(title="📜 Session History", description="\n".join(lines), color=discord.Color.blurple())
+        title = f"📜 {mode.title()} Session History" if mode else "📜 Session History"
+        embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.blurple())
         embed.set_footer(text="Most recent 10 completed sessions. Test sessions never appear here.")
         await interaction.response.send_message(embed=embed)
 

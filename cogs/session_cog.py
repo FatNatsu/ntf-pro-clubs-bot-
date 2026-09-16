@@ -540,16 +540,21 @@ class SessionCog(commands.Cog):
         match (after it went live, before the result is reported) from
         being credited for a game they didn't actually play from the start.
         Falls back to the live current roster if no freeze was ever taken
-        for this match (e.g. captains didn't use the button)."""
+        for this match (e.g. captains didn't use the button).
+        MMR/wins/losses come from this session's MODE specifically - captain
+        and NA status stay shared, so those still come from the players
+        table, but MMR is fully mode-scoped."""
         state = self.active_sessions[session_id]
         guild_id = state["guild_id"]
+        mode = state["mode"]
         frozen = state.get("match_rosters", {}).get(match_id) if match_id is not None else None
         ids = frozen[side] if frozen else state["teams"][team_id]["on_field"]
         players = []
         for pid in ids:
             p = db.get_player(guild_id, pid)
             if p:
-                players.append(p)
+                mode_stats = db.get_player_mode_stats(guild_id, pid, mode)
+                players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
         return players
 
     async def _get_or_create_progress_channel(self, guild: discord.Guild):
@@ -697,12 +702,11 @@ class SessionCog(commands.Cog):
         control_channel = guild.get_channel(state["control_channel_id"])
         embed = discord.Embed(title="🎛️ NTF Session Control", color=discord.Color.blurple())
         for team_id, info in state["teams"].items():
-            players = [db.get_player(state["guild_id"], pid) for pid in info["on_field"]]
-            players = [p for p in players if p]
-            avg_mmr = round(sum(p["mmr"] for p in players) / len(players)) if players else 0
+            mmrs = [db.get_player_mode_stats(state["guild_id"], pid, state["mode"])["mmr"] for pid in info["on_field"]]
+            avg_mmr = round(sum(mmrs) / len(mmrs)) if mmrs else 0
             embed.add_field(
                 name=info["club_name"],
-                value=f"Captain: <@{info['captain_id']}>\nPlayers: {len(players)}\nAvg MMR: {avg_mmr}",
+                value=f"Captain: <@{info['captain_id']}>\nPlayers: {len(mmrs)}\nAvg MMR: {avg_mmr}",
                 inline=True,
             )
         embed.set_footer(text="Report results below. Only captains and admins can click.")
@@ -886,7 +890,7 @@ class SessionCog(commands.Cog):
             mmr_updates = mmr.apply_match_result(team_a_players, team_b_players, a_won)
             winner_ids = {p["discord_id"] for p in (team_a_players if a_won else team_b_players)}
             for discord_id, new_mmr in mmr_updates.items():
-                db.update_mmr(state["guild_id"], discord_id, new_mmr, won=discord_id in winner_ids)
+                db.update_mode_mmr(state["guild_id"], discord_id, state["mode"], new_mmr, won=discord_id in winner_ids)
 
         score_a = winner_score if a_won else loser_score
         score_b = loser_score if a_won else winner_score
@@ -997,8 +1001,19 @@ class SessionCog(commands.Cog):
         if not state["is_test"]:
             winning_players = state["teams"][winning_team_id]["on_field"]
             for pid in winning_players:
-                db.bump_mmr(state["guild_id"], pid, config.SESSION_WIN_BONUS_MMR)
+                db.bump_mode_mmr(state["guild_id"], pid, state["mode"], config.SESSION_WIN_BONUS_MMR)
             db.set_session_winner(session_id, winning_team_id)
+
+            cfg = db.get_guild_config(state["guild_id"])
+            history_channel_id = cfg.get("history_channel_id") if cfg else None
+            history_channel = guild.get_channel(history_channel_id) if history_channel_id else None
+            if history_channel:
+                winning_club = state["teams"][winning_team_id]["club_name"]
+                winning_captain = state["teams"][winning_team_id]["captain_id"]
+                mode_label = "🏆 League" if state["mode"] == "league" else "⚔️ Rivals"
+                await history_channel.send(
+                    f"{mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
+                )
 
         lines = []
         for i, team_id in enumerate(team_ids_ranked):
@@ -1125,22 +1140,21 @@ class SessionCog(commands.Cog):
             # closest to that benchmark. A team sitting below the overall
             # average naturally gets pulled toward a higher-MMR candidate;
             # a team sitting above it gets pulled toward a lower-MMR one.
+            # All MMR here is specific to this session's mode.
             all_active_ids = set()
             for t in state["teams"].values():
                 all_active_ids |= t["on_field"]
-            all_active_players = [db.get_player(guild_id, pid) for pid in all_active_ids]
-            all_active_players = [p for p in all_active_players if p]
+            all_active_mmrs = [db.get_player_mode_stats(guild_id, pid, state["mode"])["mmr"] for pid in all_active_ids]
             overall_avg = (
-                sum(p["mmr"] for p in all_active_players) / len(all_active_players)
-                if all_active_players else config.STARTING_MMR
+                sum(all_active_mmrs) / len(all_active_mmrs)
+                if all_active_mmrs else config.STARTING_MMR
             )
 
-            target_team_players = [db.get_player(guild_id, pid) for pid in state["teams"][team_id]["on_field"]]
-            target_team_players = [p for p in target_team_players if p]
-            current_total = sum(p["mmr"] for p in target_team_players)
-            current_count = len(target_team_players)
+            target_team_mmrs = [db.get_player_mode_stats(guild_id, pid, state["mode"])["mmr"] for pid in state["teams"][team_id]["on_field"]]
+            current_total = sum(target_team_mmrs)
+            current_count = len(target_team_mmrs)
 
-            candidate_mmr = {m.id: (db.get_player(guild_id, m.id) or {"mmr": config.STARTING_MMR})["mmr"] for m in candidates}
+            candidate_mmr = {m.id: db.get_player_mode_stats(guild_id, m.id, state["mode"])["mmr"] for m in candidates}
 
             def resulting_avg(mmr):
                 return (current_total + mmr) / (current_count + 1)
