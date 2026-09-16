@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS club_match_results (
     match_id        INTEGER NOT NULL,
     club_name       TEXT NOT NULL,
     result          TEXT NOT NULL,   -- 'win' | 'loss'
+    mode            TEXT,            -- 'rivals' | 'league' - lets club records split by mode too
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -168,6 +169,22 @@ def init_db():
             conn.execute("ALTER TABLE guild_config ADD COLUMN leaderboard_message_id_league INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE club_match_results ADD COLUMN mode TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+        # One-time backfill: existing club_match_results rows predate the
+        # mode column and have NULL there - fill them in from the session
+        # each match actually belonged to, via the same join path used at
+        # query time, so historical club records split correctly by mode
+        # too instead of just the rows recorded going forward.
+        conn.execute(
+            "UPDATE club_match_results SET mode = ("
+            "  SELECT s.mode FROM matches m JOIN sessions s ON m.session_id = s.id "
+            "  WHERE m.id = club_match_results.match_id"
+            ") WHERE mode IS NULL"
+        )
 
         # One-time backfill: seed player_mode_stats for every existing
         # player from their current combined mmr/wins/losses, so nobody's
@@ -460,14 +477,15 @@ def reset_leaderboard(guild_id: int):
         )
 
 
-def reset_club_records(guild_id: int):
-    """Season reset for clubs: wipes every club's win/loss record (and best
-    run / recent form, since those are derived from the same rows) for this
-    guild. The club NAME pool itself (/club add /club remove) is untouched -
-    this only clears the match history behind /club_stats. Returns how many
-    rows were deleted."""
+def reset_club_records(guild_id: int, mode: str):
+    """Season reset for clubs in ONE mode only - the other mode's club
+    records are untouched (and so is best run / recent form, since those are
+    derived from the same rows), matching how player MMR resets per mode.
+    The club NAME pool itself (/club add /club remove) is untouched - this
+    only clears the match history behind /club_stats for this mode. Returns
+    how many rows were deleted."""
     with get_conn() as conn:
-        cur = conn.execute("DELETE FROM club_match_results WHERE guild_id=?", (guild_id,))
+        cur = conn.execute("DELETE FROM club_match_results WHERE guild_id=? AND mode=?", (guild_id, mode))
         return cur.rowcount
 
 
@@ -763,8 +781,9 @@ def get_match(match_id):
 
 def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_id,
                                 team_a_player_ids, team_b_player_ids,
-                                club_a, club_b, a_won):
-    """Log one row per player for this match, and one row per side for the club."""
+                                club_a, club_b, a_won, mode):
+    """Log one row per player for this match, and one row per side for the
+    club. mode tags the club rows so club records can be split by mode too."""
     with get_conn() as conn:
         for pid in team_a_player_ids:
             conn.execute(
@@ -779,12 +798,12 @@ def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_
                 (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win"),
             )
         conn.execute(
-            "INSERT INTO club_match_results (guild_id, match_id, club_name, result) VALUES (?, ?, ?, ?)",
-            (guild_id, match_id, club_a, "win" if a_won else "loss"),
+            "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
+            (guild_id, match_id, club_a, "win" if a_won else "loss", mode),
         )
         conn.execute(
-            "INSERT INTO club_match_results (guild_id, match_id, club_name, result) VALUES (?, ?, ?, ?)",
-            (guild_id, match_id, club_b, "loss" if a_won else "win"),
+            "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
+            (guild_id, match_id, club_b, "loss" if a_won else "win", mode),
         )
 
 
@@ -892,33 +911,54 @@ def get_player_most_played_with(guild_id, player_id):
         return dict(row) if row else None
 
 
-def get_club_record(guild_id, club_name):
+def get_club_record(guild_id, club_name, mode):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT "
             "SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins, "
             "SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses "
-            "FROM club_match_results WHERE guild_id=? AND club_name=?",
-            (guild_id, club_name),
+            "FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=?",
+            (guild_id, club_name, mode),
         ).fetchone()
         return {"wins": row["wins"] or 0, "losses": row["losses"] or 0}
 
 
-def get_club_recent_form(guild_id, club_name, limit=10):
+def get_club_recent_form(guild_id, club_name, mode, limit=10):
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? ORDER BY id DESC LIMIT ?",
-            (guild_id, club_name, limit),
+            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? ORDER BY id DESC LIMIT ?",
+            (guild_id, club_name, mode, limit),
         ).fetchall()
         return ["W" if r["result"] == "win" else "L" for r in rows]
 
 
-def get_club_best_run(guild_id, club_name):
-    """Longest consecutive win streak in chronological order."""
+def get_club_streak(guild_id, club_name, mode):
+    """Returns (streak_type, count) for this club in this mode specifically -
+    same shape as get_player_streak. Returns (None, 0) if the club has no
+    recorded results in this mode yet."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? ORDER BY id ASC",
-            (guild_id, club_name),
+            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? ORDER BY id DESC",
+            (guild_id, club_name, mode),
+        ).fetchall()
+    if not rows:
+        return None, 0
+    current_result = rows[0]["result"]
+    count = 0
+    for r in rows:
+        if r["result"] == current_result:
+            count += 1
+        else:
+            break
+    return ("W" if current_result == "win" else "L"), count
+
+
+def get_club_best_run(guild_id, club_name, mode):
+    """Longest consecutive win streak in chronological order, for this mode specifically."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? ORDER BY id ASC",
+            (guild_id, club_name, mode),
         ).fetchall()
     best = current = 0
     for r in rows:
