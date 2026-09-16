@@ -122,28 +122,43 @@ class StatsCog(commands.Cog):
         embed.set_footer(text="Most recent 10 completed sessions. Test sessions never appear here.")
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="club_stats", description="View a club's record and best run in this server")
+    @app_commands.command(name="club_stats", description="View a club's record, streak, and best run in this server, for both modes")
     async def club_stats(self, interaction: discord.Interaction, club_name: str):
         guild_id = interaction.guild_id
-        record = db.get_club_record(guild_id, club_name)
-        if record["wins"] == 0 and record["losses"] == 0:
+        rivals_record = db.get_club_record(guild_id, club_name, "rivals")
+        league_record = db.get_club_record(guild_id, club_name, "league")
+        if sum(rivals_record.values()) == 0 and sum(league_record.values()) == 0:
             await interaction.response.send_message(
                 f"No match history found for **{club_name}** in this server yet.", ephemeral=True
             )
             return
 
-        form = db.get_club_recent_form(guild_id, club_name, limit=10)
-        best_run = db.get_club_best_run(guild_id, club_name)
+        rivals_form = db.get_club_recent_form(guild_id, club_name, "rivals", limit=10)
+        league_form = db.get_club_recent_form(guild_id, club_name, "league", limit=10)
+        rivals_streak = db.get_club_streak(guild_id, club_name, "rivals")
+        league_streak = db.get_club_streak(guild_id, club_name, "league")
+        rivals_best_run = db.get_club_best_run(guild_id, club_name, "rivals")
+        league_best_run = db.get_club_best_run(guild_id, club_name, "league")
         top_player = db.get_club_top_player(guild_id, club_name)
 
         embed = discord.Embed(title=f"🛡️ {club_name}", color=discord.Color.dark_gold())
-        embed.add_field(name="Record", value=f"{record['wins']}W - {record['losses']}L", inline=True)
-        embed.add_field(name="Best Run", value=f"{best_run} wins in a row", inline=True)
+        embed.add_field(
+            name="⚔️ Rivals",
+            value=f"{rivals_record['wins']}W - {rivals_record['losses']}L\n{_streak_string(*rivals_streak)}\nBest run: {rivals_best_run} wins in a row",
+            inline=True,
+        )
+        embed.add_field(
+            name="🏆 League",
+            value=f"{league_record['wins']}W - {league_record['losses']}L\n{_streak_string(*league_streak)}\nBest run: {league_best_run} wins in a row",
+            inline=True,
+        )
         embed.add_field(name="\u200b", value="\u200b", inline=True)
-        embed.add_field(name="Recent Form (last 10)", value=_form_string(form), inline=False)
+        embed.add_field(name="Rivals Recent Form", value=_form_string(rivals_form), inline=True)
+        embed.add_field(name="League Recent Form", value=_form_string(league_form), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
         if top_player:
             embed.add_field(
-                name="Top Player",
+                name="Top Player (both modes combined)",
                 value=f"<@{top_player['player_id']}> ({top_player['wins']} wins)",
                 inline=False,
             )

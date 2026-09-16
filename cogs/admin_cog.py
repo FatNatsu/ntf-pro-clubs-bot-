@@ -21,12 +21,13 @@ class ConfirmSeasonResetView(discord.ui.View):
     @discord.ui.button(label="Yes, reset the season", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         db.reset_mode_leaderboard(self.guild_id, self.mode)
-        clubs_reset = db.reset_club_records(self.guild_id)
+        clubs_reset = db.reset_club_records(self.guild_id, self.mode)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.edit_message(
             content=f"✅ **{self.mode.title()}** season reset — every player's {self.mode} MMR is back to "
-                    f"{config.STARTING_MMR} with a clean record, and {clubs_reset} club result(s) were cleared too "
-                    f"(club records aren't split by mode). Run this again for the other mode if you want that reset too.",
+                    f"{config.STARTING_MMR} with a clean record, and {clubs_reset} **{self.mode}** club result(s) "
+                    f"were cleared too. The other mode's player and club records are completely untouched — run "
+                    f"this again for that mode if you want that reset too.",
             view=None,
         )
 
@@ -316,10 +317,11 @@ class AdminCog(commands.Cog):
     async def season_reset(self, interaction: discord.Interaction, mode: Literal["rivals", "league"]):
         await interaction.response.send_message(
             f"⚠️ This resets **every player's {mode} MMR** in this server back to {config.STARTING_MMR} with a "
-            f"clean win/loss record for {mode} specifically (the other mode is untouched), AND wipes every "
-            f"**club's** win/loss record too (club records aren't split by mode). Player match history "
-            f"(recent form, best club, most-played-with) stays intact — only current standings reset, not "
-            f"the historical log. This can't be undone. Continue?",
+            f"clean win/loss record for {mode} specifically, AND wipes every **club's {mode} win/loss record** "
+            f"too. The other mode's player and club records are completely untouched — run this again for that "
+            f"mode separately if you want it reset too. Player match history (recent form, best club, "
+            f"most-played-with) stays intact — only current standings reset, not the historical log. This "
+            f"can't be undone. Continue?",
             view=ConfirmSeasonResetView(self.bot, interaction.guild_id, mode),
             ephemeral=True,
         )

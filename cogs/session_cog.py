@@ -936,7 +936,7 @@ class SessionCog(commands.Cog):
             db.record_match_participants(
                 state["guild_id"], match_id, session_id, team_a_id, team_b_id,
                 [p["discord_id"] for p in team_a_players], [p["discord_id"] for p in team_b_players],
-                club_a, club_b, a_won,
+                club_a, club_b, a_won, state["mode"],
             )
 
         winner_club = state["teams"][winner_team_id]["club_name"]
