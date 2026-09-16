@@ -108,7 +108,23 @@ CREATE TABLE IF NOT EXISTS guild_config (
     progress_channel_id     INTEGER,
     leaderboard_channel_id  INTEGER,
     leaderboard_message_id  INTEGER,
-    queue_channel_id        INTEGER
+    queue_channel_id        INTEGER,
+    history_channel_id      INTEGER,
+    leaderboard_message_id_rivals  INTEGER,
+    leaderboard_message_id_league  INTEGER
+);
+
+-- Separate MMR/wins/losses per mode (rivals vs league). Captain and NA
+-- status stay on the players table above - those are shared across both
+-- modes by design, only MMR/win-loss are split.
+CREATE TABLE IF NOT EXISTS player_mode_stats (
+    guild_id        INTEGER NOT NULL,
+    discord_id      INTEGER NOT NULL,
+    mode            TEXT NOT NULL,               -- 'rivals' | 'league'
+    mmr             INTEGER NOT NULL DEFAULT 1200,
+    wins            INTEGER NOT NULL DEFAULT 0,
+    losses          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, discord_id, mode)
 );
 """
 
@@ -140,6 +156,32 @@ def init_db():
             conn.execute("ALTER TABLE sessions ADD COLUMN winning_team_id INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE guild_config ADD COLUMN history_channel_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE guild_config ADD COLUMN leaderboard_message_id_rivals INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE guild_config ADD COLUMN leaderboard_message_id_league INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+        # One-time backfill: seed player_mode_stats for every existing
+        # player from their current combined mmr/wins/losses, so nobody's
+        # progress vanishes the moment MMR splits into per-mode tracking.
+        # INSERT OR IGNORE makes this safe to run on every startup - once a
+        # player has real rivals/league rows, this never touches them again.
+        existing_players = conn.execute("SELECT guild_id, discord_id, mmr, wins, losses FROM players").fetchall()
+        for p in existing_players:
+            for mode in ("rivals", "league"):
+                conn.execute(
+                    "INSERT OR IGNORE INTO player_mode_stats (guild_id, discord_id, mode, mmr, wins, losses) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (p["guild_id"], p["discord_id"], mode, p["mmr"], p["wins"], p["losses"]),
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +231,207 @@ def get_na_players(guild_id: int):
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM players WHERE guild_id=? AND is_na=1", (guild_id,)).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Per-mode MMR/wins/losses - captain and NA status above stay shared across
+# both modes; only these are actually split.
+# ---------------------------------------------------------------------------
+
+def ensure_player_mode_stats(guild_id: int, discord_id: int, mode: str):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO player_mode_stats (guild_id, discord_id, mode, mmr) VALUES (?, ?, ?, ?)",
+            (guild_id, discord_id, mode, config.STARTING_MMR),
+        )
+
+
+def get_player_mode_stats(guild_id: int, discord_id: int, mode: str):
+    """Auto-creates a default row (starting MMR, 0W-0L) if this player has
+    never had a result recorded in this specific mode yet."""
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM player_mode_stats WHERE guild_id=? AND discord_id=? AND mode=?",
+            (guild_id, discord_id, mode),
+        ).fetchone()
+        return dict(row)
+
+
+def update_mode_mmr(guild_id: int, discord_id: int, mode: str, new_mmr: int, won: bool):
+    """The per-mode equivalent of update_mmr - records a full match result
+    (new MMR + win/loss increment) for this specific mode only."""
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        if won:
+            conn.execute(
+                "UPDATE player_mode_stats SET mmr=?, wins=wins+1 WHERE guild_id=? AND discord_id=? AND mode=?",
+                (new_mmr, guild_id, discord_id, mode),
+            )
+        else:
+            conn.execute(
+                "UPDATE player_mode_stats SET mmr=?, losses=losses+1 WHERE guild_id=? AND discord_id=? AND mode=?",
+                (new_mmr, guild_id, discord_id, mode),
+            )
+
+
+def set_mode_mmr(guild_id: int, discord_id: int, mode: str, new_mmr: int):
+    """Admin correction - sets MMR directly for one mode, without touching
+    win/loss counts."""
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE player_mode_stats SET mmr=? WHERE guild_id=? AND discord_id=? AND mode=?",
+            (max(0, new_mmr), guild_id, discord_id, mode),
+        )
+
+
+def bump_mode_mmr(guild_id: int, discord_id: int, mode: str, amount: int):
+    """Adds amount to a player's MMR in one mode without touching win/loss -
+    used for the session-win bonus."""
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE player_mode_stats SET mmr=MAX(0, mmr+?) WHERE guild_id=? AND discord_id=? AND mode=?",
+            (amount, guild_id, discord_id, mode),
+        )
+
+
+def deduct_mode_mmr(guild_id: int, discord_id: int, mode: str, amount: int):
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?) WHERE guild_id=? AND discord_id=? AND mode=?",
+            (abs(amount), guild_id, discord_id, mode),
+        )
+
+
+def add_mode_wins(guild_id: int, discord_id: int, mode: str, amount: int):
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT wins FROM player_mode_stats WHERE guild_id=? AND discord_id=? AND mode=?",
+            (guild_id, discord_id, mode),
+        ).fetchone()
+        new_wins = row["wins"] + abs(amount)
+        conn.execute(
+            "UPDATE player_mode_stats SET wins=? WHERE guild_id=? AND discord_id=? AND mode=?",
+            (new_wins, guild_id, discord_id, mode),
+        )
+        return new_wins
+
+
+def deduct_mode_wins(guild_id: int, discord_id: int, mode: str, amount: int):
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT wins FROM player_mode_stats WHERE guild_id=? AND discord_id=? AND mode=?",
+            (guild_id, discord_id, mode),
+        ).fetchone()
+        new_wins = max(0, row["wins"] - abs(amount))
+        conn.execute(
+            "UPDATE player_mode_stats SET wins=? WHERE guild_id=? AND discord_id=? AND mode=?",
+            (new_wins, guild_id, discord_id, mode),
+        )
+        return new_wins
+
+
+def add_mode_losses(guild_id: int, discord_id: int, mode: str, amount: int):
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT losses FROM player_mode_stats WHERE guild_id=? AND discord_id=? AND mode=?",
+            (guild_id, discord_id, mode),
+        ).fetchone()
+        new_losses = row["losses"] + abs(amount)
+        conn.execute(
+            "UPDATE player_mode_stats SET losses=? WHERE guild_id=? AND discord_id=? AND mode=?",
+            (new_losses, guild_id, discord_id, mode),
+        )
+        return new_losses
+
+
+def deduct_mode_losses(guild_id: int, discord_id: int, mode: str, amount: int):
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT losses FROM player_mode_stats WHERE guild_id=? AND discord_id=? AND mode=?",
+            (guild_id, discord_id, mode),
+        ).fetchone()
+        new_losses = max(0, row["losses"] - abs(amount))
+        conn.execute(
+            "UPDATE player_mode_stats SET losses=? WHERE guild_id=? AND discord_id=? AND mode=?",
+            (new_losses, guild_id, discord_id, mode),
+        )
+        return new_losses
+
+
+def mode_leaderboard(guild_id: int, mode: str, limit=20, offset=0):
+    """Same shape as leaderboard() but scoped to one mode - joins in
+    display_name/is_captain from players for convenience."""
+    with get_conn() as conn:
+        if limit is None:
+            rows = conn.execute(
+                "SELECT p.discord_id, p.display_name, p.is_captain, pms.mmr, pms.wins, pms.losses "
+                "FROM player_mode_stats pms JOIN players p ON pms.guild_id=p.guild_id AND pms.discord_id=p.discord_id "
+                "WHERE pms.guild_id=? AND pms.mode=? ORDER BY pms.mmr DESC",
+                (guild_id, mode),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT p.discord_id, p.display_name, p.is_captain, pms.mmr, pms.wins, pms.losses "
+                "FROM player_mode_stats pms JOIN players p ON pms.guild_id=p.guild_id AND pms.discord_id=p.discord_id "
+                "WHERE pms.guild_id=? AND pms.mode=? ORDER BY pms.mmr DESC LIMIT ? OFFSET ?",
+                (guild_id, mode, limit, offset),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def count_mode_players(guild_id: int, mode: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM player_mode_stats WHERE guild_id=? AND mode=?", (guild_id, mode)
+        ).fetchone()
+        return row["c"]
+
+
+def get_mode_rank_position(guild_id: int, discord_id: int, mode: str):
+    """1-based position on this guild's per-mode MMR leaderboard, or None
+    if untracked in that mode."""
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT discord_id FROM player_mode_stats WHERE guild_id=? AND mode=? ORDER BY mmr DESC",
+            (guild_id, mode),
+        ).fetchall()
+        for i, r in enumerate(rows, start=1):
+            if r["discord_id"] == discord_id:
+                return i
+        return None
+
+
+def reset_mode_leaderboard(guild_id: int, mode: str):
+    """Season reset for one mode only - the other mode's stats are
+    untouched. Run once per mode if you want both reset."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE player_mode_stats SET mmr=?, wins=0, losses=0 WHERE guild_id=? AND mode=?",
+            (config.STARTING_MMR, guild_id, mode),
+        )
+
+
+def prune_left_members_mode_stats(guild_id: int, active_discord_ids: set):
+    """Companion to prune_left_members - also removes per-mode stats rows
+    for anyone no longer in the server, across both modes."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT discord_id FROM player_mode_stats WHERE guild_id=?", (guild_id,)
+        ).fetchall()
+        tracked_ids = {r["discord_id"] for r in rows}
+        to_remove = tracked_ids - active_discord_ids
+        for discord_id in to_remove:
+            conn.execute("DELETE FROM player_mode_stats WHERE guild_id=? AND discord_id=?", (guild_id, discord_id))
+        return len(to_remove)
 
 
 def set_mmr(guild_id: int, discord_id: int, new_mmr: int):
@@ -405,20 +648,31 @@ def set_session_winner(session_id, winning_team_id):
         conn.execute("UPDATE sessions SET winning_team_id=? WHERE id=?", (winning_team_id, session_id))
 
 
-def get_session_history(guild_id, limit=10):
+def get_session_history(guild_id, limit=10, mode=None):
     """Most recent completed sessions first, with the winning club's name
     and captain resolved via a join - only includes sessions that actually
     finished with a recorded winner (test sessions never set one, so they
-    won't show up here)."""
+    won't show up here). Pass mode='rivals' or 'league' to filter to just
+    that mode; omit it to see both mixed together, most recent first."""
     with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT s.id, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
-            "FROM sessions s "
-            "JOIN teams t ON s.winning_team_id = t.id "
-            "WHERE s.guild_id=? AND s.status='ended' "
-            "ORDER BY s.created_at DESC LIMIT ?",
-            (guild_id, limit),
-        ).fetchall()
+        if mode:
+            rows = conn.execute(
+                "SELECT s.id, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
+                "FROM sessions s "
+                "JOIN teams t ON s.winning_team_id = t.id "
+                "WHERE s.guild_id=? AND s.status='ended' AND s.mode=? "
+                "ORDER BY s.created_at DESC LIMIT ?",
+                (guild_id, mode, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT s.id, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
+                "FROM sessions s "
+                "JOIN teams t ON s.winning_team_id = t.id "
+                "WHERE s.guild_id=? AND s.status='ended' "
+                "ORDER BY s.created_at DESC LIMIT ?",
+                (guild_id, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -735,7 +989,7 @@ def get_guild_config(guild_id: int):
 
 
 def upsert_guild_config(guild_id: int, **fields):
-    """fields may include progress_channel_id, leaderboard_channel_id, leaderboard_message_id."""
+    """fields may include progress_channel_id, leaderboard_channel_id, leaderboard_message_id, queue_channel_id, history_channel_id."""
     if not fields:
         return
     with get_conn() as conn:
