@@ -118,6 +118,22 @@ async def create_leaderboard_channel(guild):
     return channel
 
 
+async def create_history_channel(guild):
+    """Permanent, read-only, top-level - a running feed where each completed
+    session's winner gets posted as its own message, building up a
+    permanent log over time (unlike the leaderboard channel, which edits
+    one message in place)."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    channel = await guild.create_text_channel(
+        name=config.HISTORY_CHANNEL_NAME,
+        overwrites=overwrites,
+    )
+    return channel
+
+
 async def create_queue_channel(guild):
     """Permanent, top-level - holds the NTF queue panel. Read-only aside from
     the bot so it stays a clean, clutter-free entry point (all interaction
