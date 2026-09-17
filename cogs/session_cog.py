@@ -291,6 +291,43 @@ class ReassignCaptainTeamSelectView(discord.ui.View):
         await interaction.response.send_message(f"Who should captain **{club_name}**?", view=view, ephemeral=True)
 
 
+class RemovePlayerSelectView(discord.ui.View):
+    """Pick a currently-rostered player to remove from their team entirely
+    (not benched, not transferred elsewhere - fully off the roster). Frees
+    up their team's sub slot for someone else, for when a player leaves the
+    session mid-way and there's no one to swap them for."""
+
+    def __init__(self, cog: "SessionCog", session_id):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        state = cog.active_sessions[session_id]
+
+        options = []
+        for team_id, info in state["teams"].items():
+            for pid in info["on_field"]:
+                member = cog.bot.get_user(pid)
+                label = member.display_name if member else str(pid)
+                options.append(discord.SelectOption(label=f"{label} ({info['club_name']})", value=f"{team_id}:{pid}"))
+
+        if options:
+            select = discord.ui.Select(placeholder="Remove which player from their team entirely?", options=options[:25])
+            select.callback = self._on_select
+            self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        team_id_str, pid_str = interaction.data["values"][0].split(":")
+        team_id, player_id = int(team_id_str), int(pid_str)
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.followup.send("This session has ended.", ephemeral=True)
+            return
+        club_name = state["teams"][team_id]["club_name"]
+        await self.cog.remove_player_from_roster(interaction.guild, self.session_id, team_id, player_id)
+        await interaction.followup.send(f"❌ Removed <@{player_id}> from **{club_name}**'s roster. That slot is now free.", ephemeral=True)
+
+
 class TransferPlayerSelectView(discord.ui.View):
     """First step of a manual transfer - pick which currently-rostered
     player to move. Only lists players actively on a team, not fake/test
@@ -348,6 +385,10 @@ class SessionControlPanelView(discord.ui.View):
         reassign_btn.callback = self._reassign_captain_callback
         self.add_item(reassign_btn)
 
+        remove_btn = discord.ui.Button(label="Remove Player", style=discord.ButtonStyle.danger, emoji="❌")
+        remove_btn.callback = self._remove_player_callback
+        self.add_item(remove_btn)
+
         end_btn = discord.ui.Button(label="End Session", style=discord.ButtonStyle.danger, emoji="🛑")
         end_btn.callback = self._end_callback
         self.add_item(end_btn)
@@ -388,6 +429,23 @@ class SessionControlPanelView(discord.ui.View):
             return
         view = ReassignCaptainTeamSelectView(self.cog, self.session_id)
         await interaction.response.send_message("Which team needs a new captain?", view=view, ephemeral=True)
+
+    async def _remove_player_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only an admin can remove a player from their team's roster entirely.",
+                ephemeral=True,
+            )
+            return
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        view = RemovePlayerSelectView(self.cog, self.session_id)
+        if not view.children:
+            await interaction.response.send_message("Nobody is currently rostered to remove.", ephemeral=True)
+            return
+        await interaction.response.send_message("Remove who from their team entirely?", view=view, ephemeral=True)
 
     async def _end_callback(self, interaction: discord.Interaction):
         state = self.cog.active_sessions.get(self.session_id)
@@ -922,6 +980,26 @@ class SessionCog(commands.Cog):
             await interaction.followup.send("This session has ended.", ephemeral=True)
             return
 
+        if match["status"] == "reported":
+            # Someone else already reported this exact match - most likely
+            # a double-click, or two people (a captain and an admin) both
+            # trying to report around the same time. Without this check,
+            # finalize_match would happily run a second time and double the
+            # win, the loss, and the MMR change for every player in it.
+            await interaction.followup.send(
+                "This match was already reported — refusing to record it a second time. "
+                "If the result was wrong, use the admin correction commands to fix it instead.",
+                ephemeral=True,
+            )
+            origin_view.btn_a.disabled = True
+            origin_view.btn_b.disabled = True
+            origin_view.btn_live.disabled = True
+            try:
+                await origin_message.edit(view=origin_view)
+            except discord.HTTPException:
+                pass
+            return
+
         team_a_id, team_b_id = match["team_a_id"], match["team_b_id"]
         a_won = winner_team_id == team_a_id
         team_a_players = self._team_players_for_match(session_id, team_a_id, match_id, "team_a")
@@ -1389,6 +1467,44 @@ class SessionCog(commands.Cog):
         progress_channel = guild.get_channel(state["progress_channel_id"])
         if progress_channel:
             await progress_channel.send(f"🎖️ <@{new_captain_id}> is now captaining **{club_name}** (previously <@{old_captain_id}>).")
+        await self._refresh_team_roster(session_id)
+
+    # -------------------------------------------------------------- full removal
+    async def remove_player_from_roster(self, guild: discord.Guild, session_id: int, team_id: int, player_id: int):
+        """Pulls a player off their team's roster entirely - not benched,
+        not transferred, just gone. Frees their seat (shrinking the team's
+        VC back down, same as any other departure) so someone else can
+        actually be subbed/transferred in without hitting the 7-player cap.
+        Unlike a transfer, captaincy is ALWAYS cleared here (no admin
+        exemption) since they're not on any team anymore at all. Their
+        Bench lock is lifted too, so if they come back later they can
+        rejoin normally through Bench instead of needing another manual fix."""
+        state = self.active_sessions[session_id]
+        info = state["teams"][team_id]
+        info["on_field"].discard(player_id)
+        db.set_member_role(team_id, player_id, "removed")
+
+        channel = guild.get_channel(info["voice_channel_id"])
+        if channel and channel.user_limit > config.TEAM_SIZE:
+            try:
+                await channel.edit(user_limit=channel.user_limit - 1)
+            except discord.HTTPException:
+                pass
+
+        was_captain = info["captain_id"] == player_id
+        if was_captain:
+            info["captain_id"] = None
+
+        member = guild.get_member(player_id)
+        bench_channel = guild.get_channel(state["bench_channel_id"])
+        if bench_channel and member:
+            await voice_utils.allow_member_in_channel(bench_channel, member, connect=True)
+
+        club_name = info["club_name"]
+        progress_channel = guild.get_channel(state["progress_channel_id"])
+        if progress_channel:
+            note = f" ⚠️ They were {club_name}'s captain — that team needs a new one via Reassign Captain." if was_captain else ""
+            await progress_channel.send(f"❌ <@{player_id}> has been removed from **{club_name}**'s roster entirely.{note}")
         await self._refresh_team_roster(session_id)
 
     # -------------------------------------------------------------- end
