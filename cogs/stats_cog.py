@@ -115,7 +115,7 @@ class StatsCog(commands.Cog):
         for row in history:
             mode_label = "🏆 League" if row["mode"] == "league" else "⚔️ Rivals"
             date_str = (row["created_at"] or "")[:10]  # just the date portion
-            lines.append(f"{mode_label} — **{row['winning_club']}** (captain <@{row['winning_captain']}>) — {date_str}")
+            lines.append(f"**#{row['id']}** — {mode_label} — **{row['winning_club']}** (captain <@{row['winning_captain']}>) — {date_str}")
 
         title = f"📜 {mode.title()} Session History" if mode else "📜 Session History"
         embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.blurple())

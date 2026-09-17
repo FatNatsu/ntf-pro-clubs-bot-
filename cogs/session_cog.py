@@ -669,6 +669,22 @@ class SessionCog(commands.Cog):
         bench_channel = channel_results[num_teams]
         control_channel = channel_results[num_teams + 1]
 
+        # Ghosts get the same free-roaming Move Members access every captain
+        # has across every team VC and Bench - NEVER session-control, since
+        # they have zero roster or match-reporting authority, purely voice
+        # mobility. Applied fresh for every session regardless of whether a
+        # given ghost is even playing in it - they're not part of the draft
+        # pool and this never touches on_field/team rosters at all.
+        for ghost in db.get_ghosts(guild.id):
+            ghost_member = guild.get_member(ghost["discord_id"])
+            if not ghost_member:
+                continue
+            for channel in list(team_channels) + [bench_channel]:
+                try:
+                    await channel.set_permissions(ghost_member, view_channel=True, connect=True, move_members=True)
+                except discord.HTTPException:
+                    pass
+
         teams_state = {}
         db_team_ids = []
         failed_moves = []  # (discord_id, intended_club_or_bench, reason) - reported to players after seating
@@ -1136,7 +1152,7 @@ class SessionCog(commands.Cog):
                 winning_captain = state["teams"][winning_team_id]["captain_id"]
                 mode_label = "🏆 League" if state["mode"] == "league" else "⚔️ Rivals"
                 await history_channel.send(
-                    f"{mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
+                    f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
                 )
 
         lines = []

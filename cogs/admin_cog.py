@@ -47,6 +47,7 @@ class AdminCog(commands.Cog):
     club_group = app_commands.Group(name="club", description="Manage this server's pool of club names used for team VCs")
     captain_group = app_commands.Group(name="captain", description="Manage this server's captain whitelist")
     na_group = app_commands.Group(name="na", description="Manage this server's NA whitelist - keeps NA players together on a team")
+    ghost_group = app_commands.Group(name="ghost", description="Manage this server's ghost whitelist - lets them move between VCs freely during a session")
 
     # ------------------------------------------------------------- one-time setup
     @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent #ntf-queue, #in-progress and #leaderboard channels")
@@ -185,6 +186,29 @@ class AdminCog(commands.Cog):
             return
         lines = [f"• <@{p['discord_id']}>" for p in na_players]
         await interaction.response.send_message("🌎 **NA whitelist:**\n" + "\n".join(lines), ephemeral=True)
+
+    # ---------------------------------------------------------------- ghost whitelist
+    @ghost_group.command(name="add", description="Mark a player as a ghost - free VC movement during sessions, no roster/session-control access")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def ghost_add(self, interaction: discord.Interaction, member: discord.Member):
+        db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        db.set_ghost(interaction.guild_id, member.id, True)
+        await interaction.response.send_message(f"👻 {member.mention} is now a ghost in this server.", ephemeral=True)
+
+    @ghost_group.command(name="remove", description="Remove a player from the ghost whitelist")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def ghost_remove(self, interaction: discord.Interaction, member: discord.Member):
+        db.set_ghost(interaction.guild_id, member.id, False)
+        await interaction.response.send_message(f"Removed {member.mention} from the ghost whitelist.", ephemeral=True)
+
+    @ghost_group.command(name="list", description="List all ghost-whitelisted players in this server")
+    async def ghost_list(self, interaction: discord.Interaction):
+        ghosts = db.get_ghosts(interaction.guild_id)
+        if not ghosts:
+            await interaction.response.send_message("No ghosts whitelisted yet in this server.", ephemeral=True)
+            return
+        lines = [f"• <@{p['discord_id']}>" for p in ghosts]
+        await interaction.response.send_message("👻 **Ghost whitelist:**\n" + "\n".join(lines), ephemeral=True)
 
     # ---------------------------------------------------------------- overrides
     @app_commands.command(name="admin_fix_mmr", description="Manually set a player's MMR in one mode in this server (corrections only)")
