@@ -73,12 +73,17 @@ class AdminCog(commands.Cog):
         if history_channel is None:
             history_channel = await voice_utils.create_history_channel(guild)
 
+        admin_log_channel = guild.get_channel(cfg.get("admin_log_channel_id")) if cfg.get("admin_log_channel_id") else None
+        if admin_log_channel is None:
+            admin_log_channel = await voice_utils.create_admin_log_channel(guild)
+
         db.upsert_guild_config(
             guild.id,
             queue_channel_id=queue_channel.id,
             progress_channel_id=progress_channel.id,
             leaderboard_channel_id=leaderboard_channel.id,
             history_channel_id=history_channel.id,
+            admin_log_channel_id=admin_log_channel.id,
         )
 
         if queue_channel_is_new:
@@ -91,7 +96,10 @@ class AdminCog(commands.Cog):
 
         await interaction.response.send_message(
             f"✅ NTF is set up for this server — {queue_channel.mention}, {progress_channel.mention}, "
-            f"{leaderboard_channel.mention}, and {history_channel.mention} are ready. These (and your "
+            f"{leaderboard_channel.mention}, {history_channel.mention}, and {admin_log_channel.mention} are ready. "
+            f"⚠️ **One manual step needed**: {admin_log_channel.mention} is hidden from everyone by default since "
+            f"Discord has no automatic way to detect who has admin permissions — go into that channel's settings "
+            f"and give your staff/mod role permission to view it. These channels (and your "
             f"clubs/captains/leaderboard) are separate per server, so other servers NTF is in won't see this data.",
             ephemeral=True,
         )

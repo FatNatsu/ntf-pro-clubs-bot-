@@ -111,14 +111,56 @@ class MatchControlView(discord.ui.View):
         self.btn_b = discord.ui.Button(label=f"{team_b_club} Win", style=discord.ButtonStyle.danger, emoji="🔴", row=0)
         self.btn_pens = discord.ui.Button(label="Went to Penalties", style=discord.ButtonStyle.secondary, emoji="⚽", row=1)
         self.btn_live = discord.ui.Button(label="Match Live", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+        self.btn_undo = discord.ui.Button(label="Undo Result (Admin)", style=discord.ButtonStyle.secondary, emoji="↩️", row=2)
         self.btn_a.callback = self._make_callback(team_a_id, team_a_club, team_b_id, team_b_club)
         self.btn_b.callback = self._make_callback(team_b_id, team_b_club, team_a_id, team_a_club)
         self.btn_pens.callback = self._make_pens_callback()
         self.btn_live.callback = self._make_live_callback()
+        self.btn_undo.callback = self._make_undo_callback()
         self.add_item(self.btn_a)
         self.add_item(self.btn_b)
         self.add_item(self.btn_pens)
         self.add_item(self.btn_live)
+        self.add_item(self.btn_undo)
+
+    def _make_undo_callback(self):
+        async def callback(interaction: discord.Interaction):
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message("Only an admin can undo a match result.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            affected = db.undo_match_result(self.match_id)
+            if affected is None:
+                await interaction.followup.send("This match hasn't been reported yet — nothing to undo.", ephemeral=True)
+                return
+
+            # re-enable the win buttons so it can be correctly re-reported
+            self.btn_a.disabled = False
+            self.btn_b.disabled = False
+            self.btn_a.style = discord.ButtonStyle.danger
+            self.btn_b.style = discord.ButtonStyle.danger
+            self.btn_a.emoji = "🔴"
+            self.btn_b.emoji = "🔴"
+            self.btn_live.disabled = False
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+            state = self.cog.active_sessions.get(self.session_id)
+            if state:
+                await self.cog._update_progress_field_reset(self.session_id, self.match_id, self.team_a_club, self.team_b_club)
+                await self.cog._log_action(
+                    self.session_id,
+                    f"↩️ <@{interaction.user.id}> undid the result for **{self.team_a_club}** vs **{self.team_b_club}** "
+                    f"— {len(affected)} player(s) reverted. Ready to be re-reported correctly.",
+                )
+            await interaction.followup.send(
+                f"✅ Undone — {len(affected)} player(s) had their win/loss and MMR reverted exactly. "
+                f"You can now click the correct winner.",
+                ephemeral=True,
+            )
+        return callback
 
     def _make_live_callback(self):
         async def callback(interaction: discord.Interaction):
@@ -144,6 +186,10 @@ class MatchControlView(discord.ui.View):
             self.btn_live.label = "Rosters Locked"
             await interaction.response.edit_message(view=self)
             await self.cog._mark_progress_field_live(self.session_id, self.match_id)
+            await self.cog._log_action(
+                self.session_id,
+                f"▶️ <@{interaction.user.id}> marked **{self.team_a_club}** vs **{self.team_b_club}** as LIVE.",
+            )
         return callback
 
     def _make_callback(self, winner_id, winner_club, loser_id, loser_club):
@@ -216,6 +262,11 @@ class TransferDestinationView(discord.ui.View):
                 f"<@{self.player_id}> is now on {club_name}'s roster, but couldn't be physically dragged there: {reason}.",
                 ephemeral=True,
             )
+        if added:
+            await self.cog._log_action(
+                self.session_id,
+                f"🔄 <@{interaction.user.id}> transferred <@{self.player_id}> to **{club_name}**.",
+            )
 
 
 class ReassignCaptainPlayerSelectView(discord.ui.View):
@@ -256,6 +307,10 @@ class ReassignCaptainPlayerSelectView(discord.ui.View):
         await self.cog.reassign_captain(interaction.guild, self.session_id, self.team_id, new_captain_id)
         club_name = state["teams"][self.team_id]["club_name"]
         await interaction.followup.send(f"🎖️ <@{new_captain_id}> is now the captain of **{club_name}**.", ephemeral=True)
+        await self.cog._log_action(
+            self.session_id,
+            f"🎖️ <@{interaction.user.id}> reassigned **{club_name}**'s captaincy to <@{new_captain_id}>.",
+        )
 
 
 class ReassignCaptainTeamSelectView(discord.ui.View):
@@ -326,6 +381,10 @@ class RemovePlayerSelectView(discord.ui.View):
         club_name = state["teams"][team_id]["club_name"]
         await self.cog.remove_player_from_roster(interaction.guild, self.session_id, team_id, player_id)
         await interaction.followup.send(f"❌ Removed <@{player_id}> from **{club_name}**'s roster. That slot is now free.", ephemeral=True)
+        await self.cog._log_action(
+            self.session_id,
+            f"❌ <@{interaction.user.id}> removed <@{player_id}> from **{club_name}**'s roster entirely.",
+        )
 
 
 class TransferPlayerSelectView(discord.ui.View):
@@ -785,6 +844,7 @@ class SessionCog(commands.Cog):
             "spectate_lock": asyncio.Lock(),
             "roster_message": None,
             "match_rosters": {},  # match_id -> {"team_a": {ids}, "team_b": {ids}} once frozen via Match Live
+            "admin_log_channel_id": (db.get_guild_config(guild.id) or {}).get("admin_log_channel_id"),
             "is_test": is_test,
         }
 
@@ -814,6 +874,12 @@ class SessionCog(commands.Cog):
                     "⚠️ **Couldn't automatically move these players into voice — they'll need to join manually:**\n"
                     + "\n".join(lines)
                 )
+
+        await self._log_action(
+            session_id,
+            f"\n━━━━━━━━━━━━━━━━━━━━\n📋 **Session #{session_id} started** — {mode.title()} — "
+            f"Teams: {clubs_line}\n━━━━━━━━━━━━━━━━━━━━",
+        )
 
         return session_id
 
@@ -882,6 +948,29 @@ class SessionCog(commands.Cog):
                 if attempt < retries:
                     await asyncio.sleep(delay)
         raise last_exc
+
+    async def _log_action(self, session_id, message):
+        """Posts one line to the admin-only audit log channel (set up via
+        /ntf_setup), if configured for this server - a permanent record of
+        who clicked what during a session (results reported, subs,
+        transfers, removals, reassignments, undos), so admins can figure
+        out exactly what happened and credit the right people afterward.
+        Best-effort: silently does nothing if the channel isn't set up or
+        the bot can't post there, since this is a supplementary record, not
+        something that should ever block the actual gameplay action."""
+        state = self.active_sessions.get(session_id)
+        if not state or not state.get("admin_log_channel_id"):
+            return
+        guild = self.bot.get_guild(state["guild_id"])
+        if not guild:
+            return
+        channel = guild.get_channel(state["admin_log_channel_id"])
+        if not channel:
+            return
+        try:
+            await channel.send(message)
+        except discord.HTTPException:
+            pass
 
     async def _post_round(self, guild, session_id, round_no):
         state = self.active_sessions[session_id]
@@ -978,6 +1067,27 @@ class SessionCog(commands.Cog):
         except (discord.HTTPException, IndexError):
             pass
 
+    async def _update_progress_field_reset(self, session_id, match_id, club_a, club_b):
+        """Resets a fixture's card in #in-progress back to the plain
+        "In progress" placeholder - used after an admin undoes a result, so
+        the card doesn't keep showing the old (wrong) winner/score while
+        the match waits to be re-reported correctly."""
+        state = self.active_sessions.get(session_id)
+        pr = state["progress_round_message"] if state else None
+        if not pr or match_id not in pr["embed_index"]:
+            return
+        message = pr["message"]
+        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
+        try:
+            embeds = list(message.embeds)
+            fixture_embed = embeds[idx]
+            fixture_embed.description = "⏳ In progress"
+            fixture_embed.colour = discord.Color.orange()
+            embeds[idx] = fixture_embed
+            await message.edit(embeds=embeds)
+        except (discord.HTTPException, IndexError):
+            pass
+
     # -------------------------------------------------------------- results
     async def finalize_match(self, interaction, match_id, winner_team_id, loser_team_id,
                               winner_score, loser_score, origin_view: MatchControlView, origin_message,
@@ -1029,8 +1139,12 @@ class SessionCog(commands.Cog):
             # individual player MMR only - clubs/teams never carry MMR themselves
             mmr_updates = mmr.apply_match_result(team_a_players, team_b_players, a_won)
             winner_ids = {p["discord_id"] for p in (team_a_players if a_won else team_b_players)}
+            old_mmr_by_id = {p["discord_id"]: p["mmr"] for p in team_a_players + team_b_players}
+            mmr_deltas = {discord_id: new_mmr - old_mmr_by_id[discord_id] for discord_id, new_mmr in mmr_updates.items()}
             for discord_id, new_mmr in mmr_updates.items():
                 db.update_mode_mmr(state["guild_id"], discord_id, state["mode"], new_mmr, won=discord_id in winner_ids)
+        else:
+            mmr_deltas = {}
 
         score_a = winner_score if a_won else loser_score
         score_b = loser_score if a_won else winner_score
@@ -1042,7 +1156,7 @@ class SessionCog(commands.Cog):
             db.record_match_participants(
                 state["guild_id"], match_id, session_id, team_a_id, team_b_id,
                 [p["discord_id"] for p in team_a_players], [p["discord_id"] for p in team_b_players],
-                club_a, club_b, a_won, state["mode"],
+                club_a, club_b, a_won, state["mode"], mmr_deltas=mmr_deltas,
             )
 
         winner_club = state["teams"][winner_team_id]["club_name"]
@@ -1069,6 +1183,13 @@ class SessionCog(commands.Cog):
         pens_note = " (on penalties)" if went_to_pens else ""
         test_note = " *(test — not recorded)*" if state["is_test"] else ""
         await interaction.followup.send(f"Result recorded — {winner_club} win{pens_note} ✅{test_note}", ephemeral=True)
+
+        score_text = "" if went_to_pens else f" {score_a}-{score_b}"
+        await self._log_action(
+            session_id,
+            f"🔴 <@{interaction.user.id}> reported: **{club_a}** vs **{club_b}**{score_text} — "
+            f"winner **{winner_club}**{pens_note}.",
+        )
 
         await self._maybe_advance_round(guild, session_id)
 
@@ -1356,6 +1477,10 @@ class SessionCog(commands.Cog):
         progress_channel = guild.get_channel(state["progress_channel_id"])
         await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench.")
         await self._refresh_team_roster(session_id)
+        await self._log_action(
+            session_id,
+            f"🔁 <@{interaction.user.id}> requested a sub for **{club_name}** — <@{incoming.id}> came on.",
+        )
 
         if moved:
             await interaction.followup.send(f"<@{incoming.id}> has been moved onto {club_name}.", ephemeral=True)
