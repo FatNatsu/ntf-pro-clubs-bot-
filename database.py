@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS match_participants (
     team_id         INTEGER NOT NULL,
     club_name       TEXT NOT NULL,
     result          TEXT NOT NULL,   -- 'win' | 'loss'
+    mmr_delta       INTEGER NOT NULL DEFAULT 0,  -- exact MMR change this match caused, so it can be precisely reversed later
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -113,7 +114,8 @@ CREATE TABLE IF NOT EXISTS guild_config (
     queue_channel_id        INTEGER,
     history_channel_id      INTEGER,
     leaderboard_message_id_rivals  INTEGER,
-    leaderboard_message_id_league  INTEGER
+    leaderboard_message_id_league  INTEGER,
+    admin_log_channel_id    INTEGER
 );
 
 -- Separate MMR/wins/losses per mode (rivals vs league). Captain and NA
@@ -156,6 +158,14 @@ def init_db():
             pass  # column already exists
         try:
             conn.execute("ALTER TABLE players ADD COLUMN is_ghost INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE match_participants ADD COLUMN mmr_delta INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE guild_config ADD COLUMN admin_log_channel_id INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
         try:
@@ -788,6 +798,54 @@ def report_match_result(match_id, winner_team_id, score_a=None, score_b=None):
         )
 
 
+def undo_match_result(match_id):
+    """Reverses a previously-reported match: undoes each participant's exact
+    recorded MMR delta and win/loss increment, deletes their
+    match_participants and club_match_results rows for this match, and
+    resets the match back to pending so it can be re-reported correctly.
+    Returns the list of affected discord_ids, or None if the match was
+    never actually reported (nothing to undo).
+    Note: matches reported before mmr_delta existed have it stored as 0, so
+    their win/loss count will still be correctly reversed but their MMR
+    won't move - a known limitation for pre-existing data only."""
+    with get_conn() as conn:
+        match = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+        if not match or match["status"] != "reported":
+            return None
+
+        session_row = conn.execute("SELECT mode FROM sessions WHERE id=?", (match["session_id"],)).fetchone()
+        mode = session_row["mode"] if session_row else None
+
+        participants = conn.execute(
+            "SELECT * FROM match_participants WHERE match_id=?", (match_id,)
+        ).fetchall()
+
+        affected = []
+        for p in participants:
+            if mode:
+                if p["result"] == "win":
+                    conn.execute(
+                        "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?), wins=MAX(0, wins-1) "
+                        "WHERE guild_id=? AND discord_id=? AND mode=?",
+                        (p["mmr_delta"], p["guild_id"], p["player_id"], mode),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?), losses=MAX(0, losses-1) "
+                        "WHERE guild_id=? AND discord_id=? AND mode=?",
+                        (p["mmr_delta"], p["guild_id"], p["player_id"], mode),
+                    )
+            affected.append(p["player_id"])
+
+        conn.execute("DELETE FROM match_participants WHERE match_id=?", (match_id,))
+        conn.execute("DELETE FROM club_match_results WHERE match_id=?", (match_id,))
+        conn.execute(
+            "UPDATE matches SET status='pending', winner_team_id=NULL, score_a=NULL, score_b=NULL, reported_at=NULL WHERE id=?",
+            (match_id,),
+        )
+        return affected
+
+
 def get_match(match_id):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
@@ -800,21 +858,25 @@ def get_match(match_id):
 
 def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_id,
                                 team_a_player_ids, team_b_player_ids,
-                                club_a, club_b, a_won, mode):
+                                club_a, club_b, a_won, mode, mmr_deltas=None):
     """Log one row per player for this match, and one row per side for the
-    club. mode tags the club rows so club records can be split by mode too."""
+    club. mode tags the club rows so club records can be split by mode too.
+    mmr_deltas: optional {discord_id: delta} - the exact MMR change this
+    match caused for each player, so a later /undo_match_result can reverse
+    it precisely rather than guessing. Defaults to 0 if not given."""
+    mmr_deltas = mmr_deltas or {}
     with get_conn() as conn:
         for pid in team_a_player_ids:
             conn.execute(
-                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, match_id, session_id, pid, team_a_id, club_a, "win" if a_won else "loss"),
+                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, session_id, pid, team_a_id, club_a, "win" if a_won else "loss", mmr_deltas.get(pid, 0)),
             )
         for pid in team_b_player_ids:
             conn.execute(
-                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win"),
+                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win", mmr_deltas.get(pid, 0)),
             )
         conn.execute(
             "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",

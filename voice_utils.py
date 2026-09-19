@@ -134,6 +134,26 @@ async def create_history_channel(guild):
     return channel
 
 
+async def create_admin_log_channel(guild):
+    """Permanent, top-level, hidden from @everyone by default - a running
+    audit trail of every button click during a session (who reported what
+    score, who used a sub/transfer/removal/reassignment, who marked a match
+    live). Discord has no built-in "anyone with Manage Server" channel
+    overwrite, so this only denies @everyone and grants the bot - the
+    server owner needs to separately give their own staff/admin role
+    permission to view it, the same one-time manual step as setting up any
+    other private channel."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    channel = await guild.create_text_channel(
+        name=config.ADMIN_LOG_CHANNEL_NAME,
+        overwrites=overwrites,
+    )
+    return channel
+
+
 async def create_queue_channel(guild):
     """Permanent, top-level - holds the NTF queue panel. Read-only aside from
     the bot so it stays a clean, clutter-free entry point (all interaction
