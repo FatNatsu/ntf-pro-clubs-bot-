@@ -37,8 +37,10 @@ class StatsCog(commands.Cog):
         p = db.get_player(guild_id, member.id)
         rivals_stats = db.get_player_mode_stats(guild_id, member.id, "rivals")
         league_stats = db.get_player_mode_stats(guild_id, member.id, "league")
-        form = db.get_player_recent_form(guild_id, member.id, limit=10)
-        streak_type, streak_count = db.get_player_streak(guild_id, member.id)
+        rivals_form = db.get_player_recent_form(guild_id, member.id, "rivals", limit=10)
+        league_form = db.get_player_recent_form(guild_id, member.id, "league", limit=10)
+        rivals_streak = db.get_player_streak(guild_id, member.id, "rivals")
+        league_streak = db.get_player_streak(guild_id, member.id, "league")
         best_club = db.get_player_best_club(guild_id, member.id)
         best_mate = db.get_player_most_played_with(guild_id, member.id)
 
@@ -51,17 +53,19 @@ class StatsCog(commands.Cog):
 
         embed.add_field(
             name="⚔️ Rivals",
-            value=f"**{mmr.rank_for_mmr(rivals_stats['mmr'])}** — {rivals_stats['mmr']} MMR\n{rivals_stats['wins']}W - {rivals_stats['losses']}L",
+            value=f"**{mmr.rank_for_mmr(rivals_stats['mmr'])}** — {rivals_stats['mmr']} MMR\n{rivals_stats['wins']}W - {rivals_stats['losses']}L\n{_streak_string(*rivals_streak)}",
             inline=True,
         )
         embed.add_field(
             name="🏆 League",
-            value=f"**{mmr.rank_for_mmr(league_stats['mmr'])}** — {league_stats['mmr']} MMR\n{league_stats['wins']}W - {league_stats['losses']}L",
+            value=f"**{mmr.rank_for_mmr(league_stats['mmr'])}** — {league_stats['mmr']} MMR\n{league_stats['wins']}W - {league_stats['losses']}L\n{_streak_string(*league_streak)}",
             inline=True,
         )
-        embed.add_field(name="Current Streak", value=_streak_string(streak_type, streak_count), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
 
-        embed.add_field(name="Recent Form (last 10, both modes)", value=_form_string(form), inline=False)
+        embed.add_field(name="Rivals Recent Form", value=_form_string(rivals_form), inline=True)
+        embed.add_field(name="League Recent Form", value=_form_string(league_form), inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         if best_club:
             embed.add_field(name="Best Club", value=f"**{best_club['club_name']}** ({best_club['wins']} wins)", inline=True)
