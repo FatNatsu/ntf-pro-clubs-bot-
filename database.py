@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS match_participants (
     club_name       TEXT NOT NULL,
     result          TEXT NOT NULL,   -- 'win' | 'loss'
     mmr_delta       INTEGER NOT NULL DEFAULT 0,  -- exact MMR change this match caused, so it can be precisely reversed later
+    mode            TEXT,            -- 'rivals' | 'league' - lets player recent form/streak split by mode too
     created_at      TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -188,6 +189,10 @@ def init_db():
             conn.execute("ALTER TABLE club_match_results ADD COLUMN mode TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE match_participants ADD COLUMN mode TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         # One-time backfill: existing club_match_results rows predate the
         # mode column and have NULL there - fill them in from the session
@@ -198,6 +203,15 @@ def init_db():
             "UPDATE club_match_results SET mode = ("
             "  SELECT s.mode FROM matches m JOIN sessions s ON m.session_id = s.id "
             "  WHERE m.id = club_match_results.match_id"
+            ") WHERE mode IS NULL"
+        )
+
+        # Same backfill for match_participants, so historical player recent
+        # form/streak split correctly by mode too, not just new results.
+        conn.execute(
+            "UPDATE match_participants SET mode = ("
+            "  SELECT s.mode FROM matches m JOIN sessions s ON m.session_id = s.id "
+            "  WHERE m.id = match_participants.match_id"
             ") WHERE mode IS NULL"
         )
 
@@ -860,7 +874,8 @@ def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_
                                 team_a_player_ids, team_b_player_ids,
                                 club_a, club_b, a_won, mode, mmr_deltas=None):
     """Log one row per player for this match, and one row per side for the
-    club. mode tags the club rows so club records can be split by mode too.
+    club. mode tags both the player rows (recent form/streak split by mode)
+    and the club rows (club records split by mode too).
     mmr_deltas: optional {discord_id: delta} - the exact MMR change this
     match caused for each player, so a later /undo_match_result can reverse
     it precisely rather than guessing. Defaults to 0 if not given."""
@@ -868,15 +883,15 @@ def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_
     with get_conn() as conn:
         for pid in team_a_player_ids:
             conn.execute(
-                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, match_id, session_id, pid, team_a_id, club_a, "win" if a_won else "loss", mmr_deltas.get(pid, 0)),
+                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, session_id, pid, team_a_id, club_a, "win" if a_won else "loss", mmr_deltas.get(pid, 0), mode),
             )
         for pid in team_b_player_ids:
             conn.execute(
-                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win", mmr_deltas.get(pid, 0)),
+                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win", mmr_deltas.get(pid, 0), mode),
             )
         conn.execute(
             "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
@@ -888,25 +903,26 @@ def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_
         )
 
 
-def get_player_recent_form(guild_id, player_id, limit=10):
-    """Most recent results first, e.g. ['W','W','L','W']."""
+def get_player_recent_form(guild_id, player_id, mode, limit=10):
+    """Most recent results first in this specific mode, e.g. ['W','W','L','W']."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? ORDER BY id DESC LIMIT ?",
-            (guild_id, player_id, limit),
+            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? ORDER BY id DESC LIMIT ?",
+            (guild_id, player_id, mode, limit),
         ).fetchall()
         return ["W" if r["result"] == "win" else "L" for r in rows]
 
 
-def get_player_streak(guild_id, player_id):
-    """Returns (streak_type, count) - streak_type is 'W' or 'L', count is
-    how many consecutive results of that type the player currently has,
-    walking back from their most recent match. Returns (None, 0) if they
-    have no match history at all."""
+def get_player_streak(guild_id, player_id, mode):
+    """Returns (streak_type, count) for this player in this mode specifically
+    - streak_type is 'W' or 'L', count is how many consecutive results of
+    that type they currently have, walking back from their most recent
+    match in this mode. Returns (None, 0) if they have no match history in
+    this mode yet."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? ORDER BY id DESC",
-            (guild_id, player_id),
+            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? ORDER BY id DESC",
+            (guild_id, player_id, mode),
         ).fetchall()
     if not rows:
         return None, 0
