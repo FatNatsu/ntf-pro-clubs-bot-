@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS players (
     is_captain      INTEGER NOT NULL DEFAULT 0,
     is_na           INTEGER NOT NULL DEFAULT 0,
     is_ghost        INTEGER NOT NULL DEFAULT 0,
+    is_girl         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, discord_id)
 );
 
@@ -162,6 +163,10 @@ def init_db():
         except sqlite3.OperationalError:
             pass  # column already exists
         try:
+            conn.execute("ALTER TABLE players ADD COLUMN is_girl INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
             conn.execute("ALTER TABLE match_participants ADD COLUMN mmr_delta INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # column already exists
@@ -290,6 +295,20 @@ def set_ghost(guild_id: int, discord_id: int, is_ghost: bool):
 def get_ghosts(guild_id: int):
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM players WHERE guild_id=? AND is_ghost=1", (guild_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_girl(guild_id: int, discord_id: int, is_girl: bool):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET is_girl=? WHERE guild_id=? AND discord_id=?",
+            (1 if is_girl else 0, guild_id, discord_id),
+        )
+
+
+def get_girls(guild_id: int):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM players WHERE guild_id=? AND is_girl=1", (guild_id,)).fetchall()
         return [dict(r) for r in rows]
 
 
