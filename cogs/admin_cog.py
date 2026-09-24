@@ -48,6 +48,7 @@ class AdminCog(commands.Cog):
     captain_group = app_commands.Group(name="captain", description="Manage this server's captain whitelist")
     na_group = app_commands.Group(name="na", description="Manage this server's NA whitelist - keeps NA players together on a team")
     ghost_group = app_commands.Group(name="ghost", description="Manage this server's ghost whitelist - lets them move between VCs freely during a session")
+    girl_group = app_commands.Group(name="girl", description="Manage this server's girl whitelist - keeps them together on the same team")
 
     # ------------------------------------------------------------- one-time setup
     @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent #ntf-queue, #in-progress and #leaderboard channels")
@@ -217,6 +218,29 @@ class AdminCog(commands.Cog):
             return
         lines = [f"• <@{p['discord_id']}>" for p in ghosts]
         await interaction.response.send_message("👻 **Ghost whitelist:**\n" + "\n".join(lines), ephemeral=True)
+
+    # ---------------------------------------------------------------- girl whitelist
+    @girl_group.command(name="add", description="Mark a player as girl-whitelisted - the draft will try to keep them on the same team")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def girl_add(self, interaction: discord.Interaction, member: discord.Member):
+        db.ensure_player(interaction.guild_id, member.id, member.display_name)
+        db.set_girl(interaction.guild_id, member.id, True)
+        await interaction.response.send_message(f"🎀 {member.mention} is now girl-whitelisted in this server.", ephemeral=True)
+
+    @girl_group.command(name="remove", description="Remove a player from the girl whitelist")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def girl_remove(self, interaction: discord.Interaction, member: discord.Member):
+        db.set_girl(interaction.guild_id, member.id, False)
+        await interaction.response.send_message(f"Removed {member.mention} from the girl whitelist.", ephemeral=True)
+
+    @girl_group.command(name="list", description="List all girl-whitelisted players in this server")
+    async def girl_list(self, interaction: discord.Interaction):
+        girls = db.get_girls(interaction.guild_id)
+        if not girls:
+            await interaction.response.send_message("No girl-whitelisted players yet in this server.", ephemeral=True)
+            return
+        lines = [f"• <@{p['discord_id']}>" for p in girls]
+        await interaction.response.send_message("🎀 **Girl whitelist:**\n" + "\n".join(lines), ephemeral=True)
 
     # ---------------------------------------------------------------- overrides
     @app_commands.command(name="admin_fix_mmr", description="Manually set a player's MMR in one mode in this server (corrections only)")
