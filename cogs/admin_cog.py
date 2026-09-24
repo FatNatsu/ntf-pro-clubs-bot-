@@ -12,22 +12,47 @@ import leaderboard_utils
 
 
 class ConfirmSeasonResetView(discord.ui.View):
-    def __init__(self, bot, guild_id: int, mode: str):
+    def __init__(self, bot, guild_id: int):
         super().__init__(timeout=30)
         self.bot = bot
         self.guild_id = guild_id
-        self.mode = mode
 
     @discord.ui.button(label="Yes, reset the season", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        db.reset_mode_leaderboard(self.guild_id, self.mode)
-        clubs_reset = db.reset_club_records(self.guild_id, self.mode)
+        # Snapshot BOTH ladders' top 5 to the season-archive channel BEFORE
+        # anything gets wiped, since both are about to be reset together.
+        cfg = db.get_guild_config(self.guild_id)
+        archive_channel_id = cfg.get("season_archive_channel_id") if cfg else None
+        archive_channel = interaction.guild.get_channel(archive_channel_id) if archive_channel_id else None
+        if archive_channel:
+            embed = discord.Embed(
+                title="🏅 Season Ended — Rivals & League Reset",
+                color=discord.Color.gold(),
+            )
+            for snap_mode, emoji in (("rivals", "⚔️"), ("league", "🏆")):
+                top5 = db.mode_leaderboard(self.guild_id, snap_mode, limit=5)
+                if top5:
+                    lines = [
+                        f"`{i}.` **{mmr.rank_for_mmr(p['mmr'])}** — <@{p['discord_id']}> — {p['mmr']} MMR ({p['wins']}W-{p['losses']}L)"
+                        for i, p in enumerate(top5, start=1)
+                    ]
+                else:
+                    lines = ["*no players tracked yet*"]
+                embed.add_field(name=f"{emoji} {snap_mode.title()} Top 5", value="\n".join(lines), inline=False)
+            try:
+                await archive_channel.send(embed=embed)
+            except discord.HTTPException:
+                pass
+
+        clubs_reset_total = 0
+        for mode in ("rivals", "league"):
+            db.reset_mode_leaderboard(self.guild_id, mode)
+            clubs_reset_total += db.reset_club_records(self.guild_id, mode)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.response.edit_message(
-            content=f"✅ **{self.mode.title()}** season reset — every player's {self.mode} MMR is back to "
-                    f"{config.STARTING_MMR} with a clean record, and {clubs_reset} **{self.mode}** club result(s) "
-                    f"were cleared too. The other mode's player and club records are completely untouched — run "
-                    f"this again for that mode if you want that reset too.",
+            content=f"✅ **Season reset** — every player's MMR (both Rivals and League) is back to "
+                    f"{config.STARTING_MMR} with a clean record, and {clubs_reset_total} club result(s) across "
+                    f"both modes were cleared too.",
             view=None,
         )
 
@@ -78,6 +103,10 @@ class AdminCog(commands.Cog):
         if admin_log_channel is None:
             admin_log_channel = await voice_utils.create_admin_log_channel(guild)
 
+        season_archive_channel = guild.get_channel(cfg.get("season_archive_channel_id")) if cfg.get("season_archive_channel_id") else None
+        if season_archive_channel is None:
+            season_archive_channel = await voice_utils.create_season_archive_channel(guild)
+
         db.upsert_guild_config(
             guild.id,
             queue_channel_id=queue_channel.id,
@@ -85,6 +114,7 @@ class AdminCog(commands.Cog):
             leaderboard_channel_id=leaderboard_channel.id,
             history_channel_id=history_channel.id,
             admin_log_channel_id=admin_log_channel.id,
+            season_archive_channel_id=season_archive_channel.id,
         )
 
         if queue_channel_is_new:
@@ -97,7 +127,8 @@ class AdminCog(commands.Cog):
 
         await interaction.response.send_message(
             f"✅ NTF is set up for this server — {queue_channel.mention}, {progress_channel.mention}, "
-            f"{leaderboard_channel.mention}, {history_channel.mention}, and {admin_log_channel.mention} are ready. "
+            f"{leaderboard_channel.mention}, {history_channel.mention}, {admin_log_channel.mention}, and "
+            f"{season_archive_channel.mention} are ready. "
             f"⚠️ **One manual step needed**: {admin_log_channel.mention} is hidden from everyone by default since "
             f"Discord has no automatic way to detect who has admin permissions — go into that channel's settings "
             f"and give your staff/mod role permission to view it. These channels (and your "
@@ -370,15 +401,14 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="season_reset", description="[Admin] Reset every player's MMR and W-L back to the start for a new season")
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def season_reset(self, interaction: discord.Interaction, mode: Literal["rivals", "league"]):
+    async def season_reset(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            f"⚠️ This resets **every player's {mode} MMR** in this server back to {config.STARTING_MMR} with a "
-            f"clean win/loss record for {mode} specifically, AND wipes every **club's {mode} win/loss record** "
-            f"too. The other mode's player and club records are completely untouched — run this again for that "
-            f"mode separately if you want it reset too. Player match history (recent form, best club, "
-            f"most-played-with) stays intact — only current standings reset, not the historical log. This "
-            f"can't be undone. Continue?",
-            view=ConfirmSeasonResetView(self.bot, interaction.guild_id, mode),
+            f"⚠️ This resets **every player's MMR in both Rivals and League** back to {config.STARTING_MMR} with a "
+            f"clean win/loss record, AND wipes every **club's win/loss record** in both modes too. A snapshot of "
+            f"both ladders' current top 5 will be posted to the season-archive channel first. Player match "
+            f"history (recent form, best club, most-played-with) stays intact — only current standings reset, "
+            f"not the historical log. This can't be undone. Continue?",
+            view=ConfirmSeasonResetView(self.bot, interaction.guild_id),
             ephemeral=True,
         )
 
