@@ -100,6 +100,7 @@ IN_PROGRESS_CHANNEL_NAME = "📺 in-progress"      # permanent, created once via
 LEADERBOARD_CHANNEL_NAME = "🏆 leaderboard"       # permanent, created once via /ntf_setup
 HISTORY_CHANNEL_NAME = "📜 session-history"        # permanent, created once via /ntf_setup
 ADMIN_LOG_CHANNEL_NAME = "🔒 admin-log"            # permanent, created once via /ntf_setup - admin-only by default
+SEASON_ARCHIVE_CHANNEL_NAME = "🏅 season-archive"  # permanent, created once via /ntf_setup - top 5 snapshot whenever a season resets
 QUEUE_CHANNEL_NAME = "🎮 ntf-queue"                # permanent, created once via /ntf_setup
 
 # How long the final standings stay visible in #in-progress before the

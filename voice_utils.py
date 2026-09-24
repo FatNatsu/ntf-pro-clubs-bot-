@@ -154,6 +154,22 @@ async def create_admin_log_channel(guild):
     return channel
 
 
+async def create_season_archive_channel(guild):
+    """Permanent, read-only, top-level - a running feed of season-end
+    snapshots. Every time /season_reset is confirmed (for either mode),
+    the top 5 of BOTH ladders gets posted here as a permanent record
+    before the reset wipes the live leaderboard."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    channel = await guild.create_text_channel(
+        name=config.SEASON_ARCHIVE_CHANNEL_NAME,
+        overwrites=overwrites,
+    )
+    return channel
+
+
 async def create_queue_channel(guild):
     """Permanent, top-level - holds the NTF queue panel. Read-only aside from
     the bot so it stays a clean, clutter-free entry point (all interaction

@@ -117,7 +117,8 @@ CREATE TABLE IF NOT EXISTS guild_config (
     history_channel_id      INTEGER,
     leaderboard_message_id_rivals  INTEGER,
     leaderboard_message_id_league  INTEGER,
-    admin_log_channel_id    INTEGER
+    admin_log_channel_id    INTEGER,
+    season_archive_channel_id INTEGER
 );
 
 -- Separate MMR/wins/losses per mode (rivals vs league). Captain and NA
@@ -172,6 +173,10 @@ def init_db():
             pass  # column already exists
         try:
             conn.execute("ALTER TABLE guild_config ADD COLUMN admin_log_channel_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE guild_config ADD COLUMN season_archive_channel_id INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
         try:
