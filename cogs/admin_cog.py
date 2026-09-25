@@ -19,6 +19,17 @@ class ConfirmSeasonResetView(discord.ui.View):
 
     @discord.ui.button(label="Yes, reset the season", style=discord.ButtonStyle.danger, emoji="⚠️")
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Acknowledge IMMEDIATELY, before any of the slower Discord API work
+        # below (the archive post, the leaderboard refresh). Discord only
+        # gives an interaction ~3 seconds before its token expires if
+        # nothing responds to it first - if that work is slow (or, as
+        # happened, hits a rate limit), the token dies and the final
+        # confirmation silently fails even though the actual reset (a plain
+        # DB call with no dependency on the token) already went through.
+        # Deferring buys a much longer window - edit_original_response stays
+        # valid for several minutes afterward, not just ~3 seconds.
+        await interaction.response.defer(ephemeral=True)
+
         # Snapshot BOTH ladders' top 5 to the season-archive channel BEFORE
         # anything gets wiped, since both are about to be reset together.
         cfg = db.get_guild_config(self.guild_id)
@@ -49,7 +60,7 @@ class ConfirmSeasonResetView(discord.ui.View):
             db.reset_mode_leaderboard(self.guild_id, mode)
             clubs_reset_total += db.reset_club_records(self.guild_id, mode)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"✅ **Season reset** — every player's MMR (both Rivals and League) is back to "
                     f"{config.STARTING_MMR} with a clean record, and {clubs_reset_total} club result(s) across "
                     f"both modes were cleared too.",

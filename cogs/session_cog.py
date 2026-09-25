@@ -703,7 +703,13 @@ class SessionCog(commands.Cog):
         missing = max(0, target_cap - actual_count)
         bench_limit = config.BENCH_SIZE + missing
 
-        built = team_balance.build_teams(players, num_teams, initial_team_size=initial_team_size)
+        # Anti-stacking: pull how many times each pair in THIS pool has
+        # already been teammates in a real match, so build_teams can avoid
+        # repeatedly handing a captain the same player session after
+        # session (3+ times triggers a swap to another team, when one's
+        # available).
+        teammate_counts = db.get_teammate_pair_counts(guild.id, [p["discord_id"] for p in players])
+        built = team_balance.build_teams(players, num_teams, initial_team_size=initial_team_size, teammate_counts=teammate_counts)
         club_names = team_balance.pick_random_club_names(db.list_clubs(guild.id), num_teams)
         captain_ids = [t["captain"]["discord_id"] for t in built]
 
