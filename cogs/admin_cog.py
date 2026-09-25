@@ -59,6 +59,7 @@ class ConfirmSeasonResetView(discord.ui.View):
         for mode in ("rivals", "league"):
             db.reset_mode_leaderboard(self.guild_id, mode)
             clubs_reset_total += db.reset_club_records(self.guild_id, mode)
+        db.set_season_boundary(self.guild_id)
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.edit_original_response(
             content=f"✅ **Season reset** — every player's MMR (both Rivals and League) is back to "
@@ -416,9 +417,10 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(
             f"⚠️ This resets **every player's MMR in both Rivals and League** back to {config.STARTING_MMR} with a "
             f"clean win/loss record, AND wipes every **club's win/loss record** in both modes too. A snapshot of "
-            f"both ladders' current top 5 will be posted to the season-archive channel first. Player match "
-            f"history (recent form, best club, most-played-with) stays intact — only current standings reset, "
-            f"not the historical log. This can't be undone. Continue?",
+            f"both ladders' current top 5 will be posted to the season-archive channel first. Recent form, current "
+            f"streak, best club, most-played-with, and club top-player will all start fresh from this point too, "
+            f"so nothing looks contradictory next to the reset 0W-0L — head-to-head and permanent session history "
+            f"stay untouched. This can't be undone. Continue?",
             view=ConfirmSeasonResetView(self.bot, interaction.guild_id),
             ephemeral=True,
         )
