@@ -58,6 +58,46 @@ def rank_for_mmr(mmr: int) -> str:
     return rank
 
 
+# Bold, outlined "squared letter" Unicode characters - plain text characters
+# (not custom server emoji), so these render identically in every server
+# the bot is in with zero per-server setup needed.
+_SQUARED_LETTERS = {
+    "G": "🄶", "F": "🄵", "E": "🄴", "D": "🄳", "C": "🄲",
+    "B": "🄱", "A": "🄰", "S": "🅂",
+}
+
+
+def rank_badge(letter: str) -> str:
+    """Bold, clearly-outlined badge for a rank letter, for display in
+    embeds - e.g. 🄳 instead of a plain "D". S+ doesn't have a single
+    squared-letter equivalent, so it's rendered as the squared S plus a
+    plus sign."""
+    if letter == "S+":
+        return "🅂+"
+    return _SQUARED_LETTERS.get(letter, letter)
+
+
+def rank_progress_bar(current_mmr: int, bar_length: int = 10) -> str:
+    """A short text progress bar showing how close current_mmr is to the
+    next rank up, e.g. '▰▰▰▰▰▱▱▱▱▱ 42 MMR to 🄲'. Already at the top rank
+    (S+) shows a fully-filled bar with no "next rank" to chase instead."""
+    thresholds = config.RANK_THRESHOLDS
+    current_rank = rank_for_mmr(current_mmr)
+    idx = next(i for i, (letter, _floor) in enumerate(thresholds) if letter == current_rank)
+    current_floor = thresholds[idx][1]
+
+    if idx + 1 >= len(thresholds):
+        return "▰" * bar_length + " **MAX RANK**"
+
+    next_letter, next_floor = thresholds[idx + 1]
+    span = next_floor - current_floor
+    progress = min(1.0, max(0.0, (current_mmr - current_floor) / span)) if span > 0 else 1.0
+    filled = round(progress * bar_length)
+    bar = "▰" * filled + "▱" * (bar_length - filled)
+    remaining = max(0, next_floor - current_mmr)
+    return f"{bar}  **{remaining}** MMR to {rank_badge(next_letter)}"
+
+
 def apply_match_result(team_a_players: list, team_b_players: list, a_won: bool):
     """
     team_a_players / team_b_players: list of dicts with 'discord_id' and 'mmr'.
