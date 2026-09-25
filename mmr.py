@@ -95,7 +95,7 @@ def rank_progress_bar(current_mmr: int, bar_length: int = 10) -> str:
     filled = round(progress * bar_length)
     bar = "▰" * filled + "▱" * (bar_length - filled)
     remaining = max(0, next_floor - current_mmr)
-    return f"{bar}  **{remaining}** MMR to {rank_badge(next_letter)}"
+    return f"{bar}  **{remaining}** MMR to **{next_letter}**"
 
 
 def apply_match_result(team_a_players: list, team_b_players: list, a_won: bool):
