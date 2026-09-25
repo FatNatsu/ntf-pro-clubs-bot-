@@ -64,7 +64,7 @@ def _cluster_whitelist(pool: list, teams: list, flag_key: str, initial_team_size
         teams[0]["bench"].extend(overflow)
 
 
-def build_teams(queued_players: list, num_teams: int, initial_team_size: int = None):
+def build_teams(queued_players: list, num_teams: int, initial_team_size: int = None, teammate_counts: dict = None):
     """
     queued_players: list of dicts {discord_id, display_name, mmr, is_captain, is_na, is_girl}
     initial_team_size: how many starters to seat per team right now (defaults
@@ -72,11 +72,20 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
         (e.g. 4 for a 16-player league force start) - the team VOICE
         CHANNELS are still created at the normal config.TEAM_SIZE cap so
         later subs from the bench can fill the remaining seats.
+    teammate_counts: optional {frozenset({discord_id_a, discord_id_b}): count}
+        - how many times each pair has been teammates in a real recorded
+        match (see database.get_teammate_pair_counts). When given, a
+        player who's already been on the SAME captain's team 3+ times
+        skips that captain's team in favor of another one with room, so
+        e.g. a captain doesn't keep getting handed the same strong
+        teammate over and over. Defaults to {} (no anti-stacking applied)
+        if not given, so existing callers keep working unchanged.
     Returns: list of team dicts:
         {captain_id, members: [discord_id...], bench: [discord_id...]}
     """
     if initial_team_size is None:
         initial_team_size = config.TEAM_SIZE
+    teammate_counts = teammate_counts or {}
     pool = list(queued_players)
     teams = []
 
@@ -109,6 +118,14 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
     # the next weaker player too - producing a measurably tighter spread
     # than a rigid snake order, especially with small team sizes where a
     # fixed pattern has little room to average out.
+    #
+    # Anti-stacking: before settling on the least-loaded team, skip past
+    # any team whose CAPTAIN has already had this exact player as a
+    # teammate 3+ times before, as long as another team with room is
+    # available instead - so a captain doesn't keep getting handed the
+    # same strong (or any) teammate session after session. If every
+    # eligible team has that conflict (rare), the least-loaded one is used
+    # anyway rather than breaking the draft over an unavoidable case.
     pool.sort(key=lambda p: -p["mmr"])
 
     for player in pool:
@@ -116,7 +133,15 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
         if not eligible:
             teams[0]["bench"].append(player)  # everyone's full - safety net, shouldn't normally happen
             continue
-        target_team = min(eligible, key=lambda t: sum(m["mmr"] for m in t["members"]))
+        eligible.sort(key=lambda t: sum(m["mmr"] for m in t["members"]))
+
+        target_team = eligible[0]
+        for candidate in eligible:
+            pair = frozenset({player["discord_id"], candidate["captain"]["discord_id"]})
+            if teammate_counts.get(pair, 0) >= 3:
+                continue  # this captain has already had this player 3+ times - try another team first
+            target_team = candidate
+            break
         target_team["members"].append(player)
 
     return teams

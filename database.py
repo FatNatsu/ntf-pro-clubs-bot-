@@ -960,6 +960,37 @@ def get_player_streak(guild_id, player_id, mode):
     return ("W" if current_result == "win" else "L"), count
 
 
+def get_teammate_pair_counts(guild_id: int, discord_ids: list):
+    """For every pair within discord_ids, counts how many times they've
+    been on the SAME team in a real recorded match (test sessions never
+    write to match_participants at all, so they're automatically excluded
+    here with no extra filtering needed). Returns {frozenset({a, b}): count}.
+    Used by the draft to avoid repeatedly stacking the same pairing
+    together, especially when a high-MMR player is involved."""
+    if len(discord_ids) < 2:
+        return {}
+    placeholders = ",".join("?" * len(discord_ids))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT match_id, team_id, player_id FROM match_participants "
+            f"WHERE guild_id=? AND player_id IN ({placeholders})",
+            (guild_id, *discord_ids),
+        ).fetchall()
+
+    groups = {}
+    for r in rows:
+        key = (r["match_id"], r["team_id"])
+        groups.setdefault(key, []).append(r["player_id"])
+
+    pair_counts = {}
+    for group in groups.values():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                pair = frozenset({group[i], group[j]})
+                pair_counts[pair] = pair_counts.get(pair, 0) + 1
+    return pair_counts
+
+
 def get_head_to_head(guild_id, player_a_id, player_b_id):
     """Returns (a_wins, b_wins, total_meetings) counting only matches where
     these two players were on OPPOSING teams (teammate matches don't count
