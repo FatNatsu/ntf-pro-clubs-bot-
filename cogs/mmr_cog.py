@@ -66,7 +66,7 @@ class MMRCog(commands.Cog):
         stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
         letter = mmr.rank_for_mmr(stats["mmr"])
         embed = discord.Embed(title=f"{member.display_name}'s {mode.title()} Rank", color=discord.Color.blurple())
-        embed.add_field(name="Rank", value=f"# {letter}", inline=True)
+        embed.add_field(name="Rank", value=f"**{letter}**", inline=True)
         embed.add_field(name="MMR", value=str(stats["mmr"]), inline=True)
         embed.add_field(name="Record", value=f"{stats['wins']}W - {stats['losses']}L", inline=True)
         embed.add_field(name="Progress", value=mmr.rank_progress_bar(stats["mmr"]), inline=False)

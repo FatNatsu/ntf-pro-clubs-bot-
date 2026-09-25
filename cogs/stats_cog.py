@@ -54,7 +54,7 @@ class StatsCog(commands.Cog):
         embed.add_field(
             name="⚔️ Rivals",
             value=(
-                f"# {mmr.rank_for_mmr(rivals_stats['mmr'])}\n"
+                f"**{mmr.rank_for_mmr(rivals_stats['mmr'])}**\n"
                 f"{rivals_stats['mmr']} MMR — {rivals_stats['wins']}W - {rivals_stats['losses']}L\n{_streak_string(*rivals_streak)}\n"
                 f"{mmr.rank_progress_bar(rivals_stats['mmr'])}"
             ),
@@ -63,7 +63,7 @@ class StatsCog(commands.Cog):
         embed.add_field(
             name="🏆 League",
             value=(
-                f"# {mmr.rank_for_mmr(league_stats['mmr'])}\n"
+                f"**{mmr.rank_for_mmr(league_stats['mmr'])}**\n"
                 f"{league_stats['mmr']} MMR — {league_stats['wins']}W - {league_stats['losses']}L\n{_streak_string(*league_streak)}\n"
                 f"{mmr.rank_progress_bar(league_stats['mmr'])}"
             ),
