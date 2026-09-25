@@ -17,10 +17,13 @@ Algorithm:
    captaining an unrelated team by MMR-tiebreak luck.
 3. The remaining teams get captains chosen normally (whitelisted first,
    highest MMR fallback) from whoever's left.
-4. Everyone still unassigned is sorted by MMR descending and dealt out in
-   a "snake" order (1,2,3,4,4,3,2,1,...) across ALL teams (including any
-   leftover seats on a clustered team) so total MMR per team stays as
-   close as possible.
+4. Everyone still unassigned is sorted by MMR descending and assigned one
+   at a time, each going to whichever team (with room left) CURRENTLY has
+   the lowest total MMR - a greedy least-loaded approach that re-checks the
+   real situation before every pick, rather than committing to a fixed
+   snake pattern in advance. This self-corrects for uneven captain MMR or
+   unlucky runs of similar players, and produces a measurably tighter
+   balance than a rigid snake order, especially with small team sizes.
 5. Anything beyond TEAM_SIZE per team (shouldn't normally happen given the
    queue caps, but kept for safety) overflows to the bench.
 """
@@ -96,26 +99,25 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
     for c in chosen_captains:
         teams.append({"captain": c, "members": [c], "bench": []})
 
-    # --- snake draft everyone else across ALL teams ----------------------
+    # --- distribute everyone else, greedily balancing by MMR ---------------
+    # Instead of a fixed snake pattern committing to a pick order in
+    # advance, re-check the ACTUAL current situation before every single
+    # assignment: each remaining player (highest MMR first) goes to
+    # whichever team with room still has the LOWEST total MMR right now.
+    # This self-corrects as it goes - if one team ends up with an unlucky
+    # captain or a run of strong players, it naturally gets prioritized for
+    # the next weaker player too - producing a measurably tighter spread
+    # than a rigid snake order, especially with small team sizes where a
+    # fixed pattern has little room to average out.
     pool.sort(key=lambda p: -p["mmr"])
 
-    order = list(range(len(teams)))
-    idx = 0
-    direction = 1
     for player in pool:
-        team = teams[order[idx]]
-        if len(team["members"]) < initial_team_size:
-            team["members"].append(player)
-        else:
-            team["bench"].append(player)
-
-        idx += direction
-        if idx == len(teams):
-            idx = len(teams) - 1
-            direction = -1
-        elif idx < 0:
-            idx = 0
-            direction = 1
+        eligible = [t for t in teams if len(t["members"]) < initial_team_size]
+        if not eligible:
+            teams[0]["bench"].append(player)  # everyone's full - safety net, shouldn't normally happen
+            continue
+        target_team = min(eligible, key=lambda t: sum(m["mmr"] for m in t["members"]))
+        target_team["members"].append(player)
 
     return teams
 
