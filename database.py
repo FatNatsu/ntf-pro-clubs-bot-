@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS guild_config (
     leaderboard_message_id_rivals  INTEGER,
     leaderboard_message_id_league  INTEGER,
     admin_log_channel_id    INTEGER,
-    season_archive_channel_id INTEGER
+    season_archive_channel_id INTEGER,
+    season_started_at       TEXT
 );
 
 -- Separate MMR/wins/losses per mode (rivals vs league). Captain and NA
@@ -177,6 +178,10 @@ def init_db():
             pass  # column already exists
         try:
             conn.execute("ALTER TABLE guild_config ADD COLUMN season_archive_channel_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE guild_config ADD COLUMN season_started_at TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
         try:
@@ -928,11 +933,13 @@ def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_
 
 
 def get_player_recent_form(guild_id, player_id, mode, limit=10):
-    """Most recent results first in this specific mode, e.g. ['W','W','L','W']."""
+    """Most recent results first in this specific mode, e.g. ['W','W','L','W'].
+    Only counts results from after this guild's last season reset, if any."""
+    season_clause, season_params = _season_filter(guild_id)
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? ORDER BY id DESC LIMIT ?",
-            (guild_id, player_id, mode, limit),
+            f"SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? {season_clause} ORDER BY id DESC LIMIT ?",
+            (guild_id, player_id, mode, *season_params, limit),
         ).fetchall()
         return ["W" if r["result"] == "win" else "L" for r in rows]
 
@@ -941,12 +948,14 @@ def get_player_streak(guild_id, player_id, mode):
     """Returns (streak_type, count) for this player in this mode specifically
     - streak_type is 'W' or 'L', count is how many consecutive results of
     that type they currently have, walking back from their most recent
-    match in this mode. Returns (None, 0) if they have no match history in
-    this mode yet."""
+    match in this mode (only counting results after the last season reset,
+    if any). Returns (None, 0) if they have no match history in this mode
+    yet (or none since the reset)."""
+    season_clause, season_params = _season_filter(guild_id)
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? ORDER BY id DESC",
-            (guild_id, player_id, mode),
+            f"SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? {season_clause} ORDER BY id DESC",
+            (guild_id, player_id, mode, *season_params),
         ).fetchall()
     if not rows:
         return None, 0
@@ -958,6 +967,32 @@ def get_player_streak(guild_id, player_id, mode):
         else:
             break
     return ("W" if current_result == "win" else "L"), count
+
+
+def set_season_boundary(guild_id: int):
+    """Marks 'now' as this guild's season start - called every time
+    /season_reset runs. Recent form, streak, best club, most-played-with,
+    and club-top-player then only look at results from AFTER this point,
+    so a freshly-reset 0W-0L display doesn't sit next to a streak or recent
+    form built from games before the reset. Season reset only clears the
+    player_mode_stats aggregate (not the permanent match_participants log,
+    which stays intact for lifetime record-keeping) - this boundary is what
+    makes the DISPLAY feel consistent with that reset too."""
+    import datetime
+    upsert_guild_config(guild_id, season_started_at=datetime.datetime.utcnow().isoformat(" "))
+
+
+def _season_filter(guild_id: int):
+    """Returns (sql_clause, params_tuple) for filtering match_participants
+    queries to only results after this guild's last season reset - an
+    empty clause/no params if it's never been reset. Splice sql_clause
+    directly into a WHERE ... AND clause and extend query params with
+    params_tuple."""
+    cfg = get_guild_config(guild_id)
+    boundary = cfg.get("season_started_at") if cfg else None
+    if not boundary:
+        return "", ()
+    return "AND created_at > ?", (boundary,)
 
 
 def get_teammate_pair_counts(guild_id: int, discord_ids: list):
@@ -1038,27 +1073,31 @@ def get_player_record(guild_id, player_id):
 
 
 def get_player_best_club(guild_id, player_id):
-    """Club this player has the most WINS with (min 1 win)."""
+    """Club this player has the most WINS with (min 1 win), counting only
+    results since the last season reset, if any."""
+    season_clause, season_params = _season_filter(guild_id)
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT club_name, COUNT(*) AS wins FROM match_participants "
-            "WHERE guild_id=? AND player_id=? AND result='win' GROUP BY club_name ORDER BY wins DESC LIMIT 1",
-            (guild_id, player_id),
+            f"SELECT club_name, COUNT(*) AS wins FROM match_participants "
+            f"WHERE guild_id=? AND player_id=? AND result='win' {season_clause} GROUP BY club_name ORDER BY wins DESC LIMIT 1",
+            (guild_id, player_id, *season_params),
         ).fetchone()
         return dict(row) if row else None
 
 
 def get_player_most_played_with(guild_id, player_id):
-    """Teammate this player has shared a team_id/match with most often."""
+    """Teammate this player has shared a team_id/match with most often,
+    counting only results since the last season reset, if any."""
+    season_clause, season_params = _season_filter(guild_id)
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT mp2.player_id AS teammate_id, COUNT(*) AS games "
-            "FROM match_participants mp1 "
-            "JOIN match_participants mp2 "
-            "  ON mp1.match_id = mp2.match_id AND mp1.team_id = mp2.team_id AND mp1.player_id != mp2.player_id "
-            "WHERE mp1.guild_id=? AND mp1.player_id=? "
-            "GROUP BY mp2.player_id ORDER BY games DESC LIMIT 1",
-            (guild_id, player_id),
+            f"SELECT mp2.player_id AS teammate_id, COUNT(*) AS games "
+            f"FROM match_participants mp1 "
+            f"JOIN match_participants mp2 "
+            f"  ON mp1.match_id = mp2.match_id AND mp1.team_id = mp2.team_id AND mp1.player_id != mp2.player_id "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"GROUP BY mp2.player_id ORDER BY games DESC LIMIT 1",
+            (guild_id, player_id, *season_params),
         ).fetchone()
         return dict(row) if row else None
 
@@ -1123,12 +1162,14 @@ def get_club_best_run(guild_id, club_name, mode):
 
 
 def get_club_top_player(guild_id, club_name):
-    """The player with the most WINS for this club (min 1 win)."""
+    """The player with the most WINS for this club (min 1 win), counting
+    only results since the last season reset, if any."""
+    season_clause, season_params = _season_filter(guild_id)
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT player_id, COUNT(*) AS wins FROM match_participants "
-            "WHERE guild_id=? AND club_name=? AND result='win' GROUP BY player_id ORDER BY wins DESC LIMIT 1",
-            (guild_id, club_name),
+            f"SELECT player_id, COUNT(*) AS wins FROM match_participants "
+            f"WHERE guild_id=? AND club_name=? AND result='win' {season_clause} GROUP BY player_id ORDER BY wins DESC LIMIT 1",
+            (guild_id, club_name, *season_params),
         ).fetchone()
         return dict(row) if row else None
 
