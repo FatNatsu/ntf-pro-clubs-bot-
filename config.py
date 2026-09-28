@@ -49,6 +49,24 @@ QUEUE_CAP = {
     "league": STARTING_TEAM_SIZE * MODE_TEAMS["league"],   # 24
 }
 
+# The live "Sub Queue" message in session-control is refreshed this many seconds
+# after the Bench changes, batching a burst of people joining/leaving into a
+# single edit instead of one Discord call per person.
+SUB_QUEUE_REFRESH_DELAY = 1.5
+
+# How a sub is chosen from the Bench: the SUB_PICK_WINDOW longest-waiting
+# players form the pool, and MMR balancing picks whoever best evens out the
+# requesting team's average from THAT pool - so wait order decides who's
+# eligible, balance decides who out of them. 1 = strict first-come-first-served
+# (no balancing); a very large number = pure MMR balancing (wait order ignored).
+SUB_PICK_WINDOW = 4
+
+# Fairness guarantee for the above: a player who's been passed over this many
+# times (still in the pool, but someone else fit a team better) goes next
+# regardless of MMR, so nobody can wait indefinitely just because they never
+# happen to be the best fit.
+SUB_MAX_SKIPS = 2
+
 # Once the queue hits its cap, players get a grace window before the session
 # actually locks in and channels get built - last chance to back out.
 READY_COUNTDOWN_SECONDS = 15
