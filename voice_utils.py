@@ -44,14 +44,10 @@ async def create_team_voice_channel(guild, category, club_name, member_ids, capt
     return channel
 
 
-async def create_bench_channel(guild, category, captain_ids, bench_limit=None):
-    """Bench: visible + joinable by anyone in the session, subject to the
-    normal cap. Captains additionally get Move Members so they can always
-    get in even if it's already full, same reasoning as team channels.
-    bench_limit lets a force-started session open up extra bench seats to
-    cover the players who weren't in the initial pop (see session_cog.py)."""
-    if bench_limit is None:
-        bench_limit = config.BENCH_SIZE
+async def create_bench_channel(guild, category, captain_ids):
+    """Bench: visible + joinable by anyone in the session, with NO player
+    cap at all (user_limit=0 is Discord's "unlimited"). Captains additionally
+    get Move Members so they can always get in and drag people around."""
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True, mute_members=True),
@@ -63,7 +59,7 @@ async def create_bench_channel(guild, category, captain_ids, bench_limit=None):
     channel = await guild.create_voice_channel(
         name=config.BENCH_CHANNEL_NAME,
         category=category,
-        user_limit=bench_limit,
+        user_limit=0,
         overwrites=overwrites,
     )
     return channel

@@ -24,7 +24,7 @@ Algorithm:
    snake pattern in advance. This self-corrects for uneven captain MMR or
    unlucky runs of similar players, and produces a measurably tighter
    balance than a rigid snake order, especially with small team sizes.
-5. Anything beyond TEAM_SIZE per team (shouldn't normally happen given the
+5. Anything beyond the starting team size per team (shouldn't normally happen given the
    queue caps, but kept for safety) overflows to the bench.
 """
 
@@ -68,9 +68,9 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
     """
     queued_players: list of dicts {discord_id, display_name, mmr, is_captain, is_na, is_girl}
     initial_team_size: how many starters to seat per team right now (defaults
-        to config.TEAM_SIZE). Force-started sessions pass a smaller number
+        to config.STARTING_TEAM_SIZE). Force-started sessions pass a smaller number
         (e.g. 4 for a 16-player league force start) - the team VOICE
-        CHANNELS are still created at the normal config.TEAM_SIZE cap so
+        CHANNELS are still created at the full config.TEAM_SIZE ceiling so
         later subs from the bench can fill the remaining seats.
     teammate_counts: optional {frozenset({discord_id_a, discord_id_b}): count}
         - how many times each pair has been teammates in a real recorded
@@ -84,7 +84,7 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
         {captain_id, members: [discord_id...], bench: [discord_id...]}
     """
     if initial_team_size is None:
-        initial_team_size = config.TEAM_SIZE
+        initial_team_size = config.STARTING_TEAM_SIZE
     teammate_counts = teammate_counts or {}
     pool = list(queued_players)
     teams = []

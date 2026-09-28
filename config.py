@@ -26,17 +26,27 @@ MODE_TEAMS = {
     "league": 4,
 }
 
-TEAM_SIZE = 6          # locked size per team voice channel
-BENCH_SIZE = 4          # locked size of the bench voice channel
+# How many players get seated on each team when a full queue pops. Teams then
+# grow from the Bench (via Add sub / Transfer) up to TEAM_SIZE below.
+STARTING_TEAM_SIZE = 6
+
+# Hard ceiling for any team, subs included (FC 27 = 11v11). Also the size of
+# every team voice channel. A team at this size can't take another player
+# until someone is removed from its roster or transferred out.
+TEAM_SIZE = 11
+
+# The Bench voice channel has no player cap at all - it's created with no user
+# limit. This constant is no longer enforced anywhere; it's only left defined
+# so any older code that still references it doesn't crash.
+BENCH_SIZE = 4
 
 QUEUE_CAP = {
-    # These are the pop thresholds you asked for: 12 for rivals, 24 for league.
-    # NOTE: this is exactly TEAM_SIZE * num_teams, i.e. enough for starting
-    # line-ups only. The bench starts EMPTY and fills as captains pull
-    # players in from the Bench VC (see session_cog.py) - it is not
-    # pre-populated from extra queue overflow.
-    "rivals": TEAM_SIZE * MODE_TEAMS["rivals"],   # 12
-    "league": TEAM_SIZE * MODE_TEAMS["league"],   # 24
+    # Pop thresholds: 12 for rivals, 24 for league - a full STARTING line-up
+    # for every team, NOT a full 11-a-side. The remaining seats on each team
+    # (up to TEAM_SIZE) get filled afterwards from the Bench, which starts
+    # EMPTY and fills as extra players join it (see session_cog.py).
+    "rivals": STARTING_TEAM_SIZE * MODE_TEAMS["rivals"],   # 12
+    "league": STARTING_TEAM_SIZE * MODE_TEAMS["league"],   # 24
 }
 
 # Once the queue hits its cap, players get a grace window before the session
