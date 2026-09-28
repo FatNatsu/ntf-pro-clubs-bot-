@@ -428,12 +428,14 @@ class SessionControlPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
         self.session_id = session_id
+        self.sub_buttons = {}  # team_id -> its Add sub button, so they can be greyed out when a team is full
 
         for team_id, info in teams.items():
             btn = discord.ui.Button(
                 label=f"Add sub — {info['club_name']}", style=discord.ButtonStyle.secondary, emoji="🔁"
             )
             btn.callback = self._make_sub_callback(team_id, info["club_name"])
+            self.sub_buttons[team_id] = btn
             self.add_item(btn)
 
         transfer_btn = discord.ui.Button(label="Transfer Player", style=discord.ButtonStyle.primary, emoji="🔄")
@@ -451,6 +453,18 @@ class SessionControlPanelView(discord.ui.View):
         end_btn = discord.ui.Button(label="End Session", style=discord.ButtonStyle.danger, emoji="🛑")
         end_btn.callback = self._end_callback
         self.add_item(end_btn)
+
+    def sync_sub_buttons(self, teams):
+        """Greys out (disables) a team's Add sub button while that team is at
+        the hard roster ceiling of config.TEAM_SIZE, and turns it back on the
+        moment they drop below it (someone removed, or transferred out).
+        The cap is ALSO enforced inside request_sub itself - this is just the
+        visible half, so nobody has to click and get told no."""
+        for team_id, btn in self.sub_buttons.items():
+            info = teams[team_id]
+            full = len(info["on_field"]) >= config.TEAM_SIZE
+            btn.disabled = full
+            btn.label = f"Full — {info['club_name']}" if full else f"Add sub — {info['club_name']}"
 
     def _make_sub_callback(self, team_id, club_name):
         async def callback(interaction: discord.Interaction):
@@ -580,20 +594,30 @@ class SpectateView(discord.ui.View):
 
                 channel = interaction.guild.get_channel(state["teams"][team_id]["voice_channel_id"])
                 await voice_utils.allow_member_in_channel(channel, member, connect=True)
-                # Bump the channel's displayed capacity by one for a
-                # spectator too - it never actually blocked the move (the
-                # bot's own Move Members bypasses that cap regardless), but
-                # showing "7/6" style numbers only for subs and never for
-                # spectators looked inconsistent, so this keeps the number
-                # honest either way.
-                try:
-                    await channel.edit(user_limit=channel.user_limit + 1)
-                except discord.HTTPException:
-                    pass
+
+                # A spectator borrows one seat on the channel's displayed
+                # capacity (it never actually blocks the move - the bot's own
+                # Move Members bypasses the cap - but this keeps the number
+                # honest). The limit is always DERIVED from who's actually
+                # watching (TEAM_SIZE + current spectators on that channel)
+                # rather than nudged up and down by one, so a double-click,
+                # a failed move, or hopping straight between Watch buttons
+                # can never make it drift past the cap.
+                previous_channel_id = state["spectators"].get(member.id)
+                already_here = previous_channel_id == channel.id
+                await self.cog._sync_spectator_capacity(
+                    interaction.guild, state, channel.id, extra=0 if already_here else 1
+                )
                 moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
                 if moved:
                     state["spectators"][member.id] = channel.id
                     await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
+                    if previous_channel_id is not None and previous_channel_id != channel.id:
+                        # switched straight from another team's Watch button
+                        await self.cog._sync_spectator_capacity(interaction.guild, state, previous_channel_id)
+                # settle at the exact count either way - if the move failed
+                # this also takes back the seat borrowed above
+                await self.cog._sync_spectator_capacity(interaction.guild, state, channel.id)
 
             if moved:
                 await interaction.followup.send(
@@ -640,17 +664,30 @@ class SessionCog(commands.Cog):
                 if after_channel_id != watching_channel_id:
                     await voice_utils.set_spectator_mute(member.guild, member.id, False)
                     del state["spectators"][member.id]
-                    # Give back the capacity the Watch button borrowed when
-                    # they joined, same as a sub leaving a team - never below
-                    # the normal TEAM_SIZE floor.
-                    watched_channel = member.guild.get_channel(watching_channel_id)
-                    if watched_channel and watched_channel.user_limit > config.TEAM_SIZE:
-                        try:
-                            await watched_channel.edit(user_limit=watched_channel.user_limit - 1)
-                        except discord.HTTPException:
-                            pass
+                    # Give back the seat the Watch button borrowed - recomputed
+                    # from who's still watching, so it settles at exactly
+                    # TEAM_SIZE (+ any remaining spectators), never below.
+                    await self._sync_spectator_capacity(member.guild, state, watching_channel_id)
 
     # ------------------------------------------------------------------ util
+    async def _sync_spectator_capacity(self, guild, state, channel_id, extra=0):
+        """Sets a team channel's user limit to TEAM_SIZE plus however many
+        spectators are currently registered as watching it (plus `extra` for
+        one about to join). Derived from the spectator record every time, so
+        it's idempotent and self-correcting - it can never drift upward the
+        way repeated +1/-1 nudges could. Roster size plays no part here: the
+        roster hard cap and Add sub buttons only ever look at on_field."""
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+        watching = sum(1 for cid in state["spectators"].values() if cid == channel_id)
+        target = config.TEAM_SIZE + watching + extra
+        if channel.user_limit != target:
+            try:
+                await channel.edit(user_limit=target)
+            except discord.HTTPException:
+                pass
+
     def is_captain_or_admin(self, interaction: discord.Interaction, session_id, team_ids=None):
         state = self.active_sessions.get(session_id)
         if not state:
@@ -701,7 +738,6 @@ class SessionCog(commands.Cog):
         target_cap = config.QUEUE_CAP[mode]
         initial_team_size = max(1, actual_count // num_teams)
         missing = max(0, target_cap - actual_count)
-        bench_limit = config.BENCH_SIZE + missing
 
         # Anti-stacking: pull how many times each pair in THIS pool has
         # already been teammates in a real match, so build_teams can avoid
@@ -727,7 +763,7 @@ class SessionCog(commands.Cog):
             voice_utils.create_team_voice_channel(guild, category, club_names[i], [m["discord_id"] for m in built_team["members"]], captain_ids)
             for i, built_team in enumerate(built)
         ]
-        bench_channel_task = voice_utils.create_bench_channel(guild, category, captain_ids, bench_limit=bench_limit)
+        bench_channel_task = voice_utils.create_bench_channel(guild, category, captain_ids)
         control_channel_task = voice_utils.create_control_channel(guild, category, captain_ids)
         channel_results = await asyncio.gather(*team_channel_tasks, bench_channel_task, control_channel_task)
         team_channels = channel_results[:num_teams]
@@ -849,6 +885,7 @@ class SessionCog(commands.Cog):
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
             "spectate_lock": asyncio.Lock(),
             "roster_message": None,
+            "control_panel": None,  # {"message", "view"} - the Add sub / Transfer / etc. button panel, kept so sub buttons can grey out live
             "match_rosters": {},  # match_id -> {"team_a": {ids}, "team_b": {ids}} once frozen via Match Live
             "admin_log_channel_id": (db.get_guild_config(guild.id) or {}).get("admin_log_channel_id"),
             "is_test": is_test,
@@ -857,13 +894,16 @@ class SessionCog(commands.Cog):
         await self._post_team_overview(guild, session_id)
         await self._post_team_roster(guild, session_id)
         control_channel_obj = guild.get_channel(control_channel.id)
-        await control_channel_obj.send(view=SessionControlPanelView(self, session_id, teams_state))
+        control_view = SessionControlPanelView(self, session_id, teams_state)
+        control_view.sync_sub_buttons(teams_state)  # a lobby that starts already full (e.g. 11v11) begins with Add sub greyed out
+        control_message = await control_channel_obj.send(view=control_view)
+        self.active_sessions[session_id]["control_panel"] = {"message": control_message, "view": control_view}
         await self._post_round(guild, session_id, 1)
 
         announce_channel = guild.get_channel(announce_channel_id)
         if announce_channel:
             clubs_line = ", ".join(club_names)
-            extra_note = f" ({missing} bench seats reserved for late arrivals.)" if missing else ""
+            extra_note = f" (Started {missing} short of a full queue — late arrivals can join the Bench and be subbed in.)" if missing else ""
             test_note = " 🧪 **TEST SESSION — no MMR, wins/losses, or match history will be recorded.**" if is_test else ""
             await announce_channel.send(
                 f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
@@ -926,10 +966,29 @@ class SessionCog(commands.Cog):
         message = await progress_channel.send(embed=self._build_roster_embed(session_id))
         state["roster_message"] = message
 
+    async def _refresh_sub_buttons(self, session_id):
+        """Re-syncs the Add sub buttons in session-control with the current
+        rosters - a team at the hard ceiling gets its button greyed out, and
+        it comes back the moment they drop below it again (someone removed
+        or transferred out). Best-effort: a failed edit never blocks the
+        roster change that triggered it."""
+        state = self.active_sessions.get(session_id)
+        panel = state.get("control_panel") if state else None
+        if not panel:
+            return
+        panel["view"].sync_sub_buttons(state["teams"])
+        try:
+            await panel["message"].edit(view=panel["view"])
+        except discord.HTTPException:
+            pass
+
     async def _refresh_team_roster(self, session_id):
         state = self.active_sessions.get(session_id)
         if not state:
             return
+        # Every roster change already calls this, so it's the one place that
+        # also keeps the Add sub buttons in step with team sizes.
+        await self._refresh_sub_buttons(session_id)
         message = state.get("roster_message")
         if not message:
             return
@@ -1351,11 +1410,15 @@ class SessionCog(commands.Cog):
             await interaction.followup.send(f"Only {club_name}'s captain can request a sub.", ephemeral=True)
             return
 
-        # Hard cap: a team can take exactly ONE sub beyond the normal 6
-        # (7 max) - never more, no matter how many times Add Sub is clicked.
-        if len(state["teams"][team_id]["on_field"]) >= config.TEAM_SIZE + 1:
+        # Hard ceiling: a team can never exceed config.TEAM_SIZE players,
+        # subs included. Subs are only available while there's a free slot -
+        # once someone is removed or transferred out, the slot opens again.
+        # (The Add sub button is also greyed out at this point, but this
+        # check stays as the real enforcement.)
+        if len(state["teams"][team_id]["on_field"]) >= config.TEAM_SIZE:
             await interaction.followup.send(
-                f"{club_name} is already at its maximum of {config.TEAM_SIZE + 1} players — it's already used its one sub slot.",
+                f"{club_name} is already at its maximum of {config.TEAM_SIZE} players — "
+                f"a slot only opens up if someone is removed from the roster or transferred out.",
                 ephemeral=True,
             )
             return
@@ -1431,44 +1494,17 @@ class SessionCog(commands.Cog):
 
             # If they're currently active on a DIFFERENT team, transfer them
             # off it first - a player can only ever be registered to one
-            # team's roster at a time. Shrink that team's VC back down by one
-            # at the same time, so a transfer is capacity-neutral overall
-            # (one channel +1, the other -1) instead of permanently inflating
-            # every team you've ever passed through.
+            # team's roster at a time. (Team voice channels are created at the
+            # full TEAM_SIZE ceiling and a roster can never exceed it, so
+            # there's no per-channel capacity to adjust as people move.)
             for other_team_id, other_info in state["teams"].items():
                 if other_team_id != team_id and incoming.id in other_info["on_field"]:
                     other_info["on_field"].discard(incoming.id)
                     db.set_member_role(other_team_id, incoming.id, "sub")
-                    other_channel = guild.get_channel(other_info["voice_channel_id"])
-                    if other_channel and other_channel.user_limit > config.TEAM_SIZE:
-                        try:
-                            await other_channel.edit(user_limit=other_channel.user_limit - 1)
-                        except discord.HTTPException:
-                            pass
                     break
-
-            # Subs otherwise ADD to the roster rather than swapping anyone
-            # else out - so a sub can legitimately push a team past the
-            # normal 6 (e.g. 6 -> 7). Raise the VC's user_limit by one first,
-            # or Discord will refuse to move them into an already-full channel.
-            try:
-                await team_channel.edit(user_limit=team_channel.user_limit + 1)
-            except discord.HTTPException:
-                pass
 
             await voice_utils.allow_member_in_channel(team_channel, incoming, connect=True)
             moved, move_fail_reason = await voice_utils.move_member_to_channel(guild, incoming.id, team_channel)
-
-            # Bench's extra capacity (if any) was only ever reserved to cover
-            # a force-start deficiency - now that this seat's been used to
-            # pull someone onto a team, give it back, same as any other
-            # capacity-neutral transfer. Never shrinks below the normal
-            # BENCH_SIZE floor.
-            if bench_channel and bench_channel.user_limit > config.BENCH_SIZE:
-                try:
-                    await bench_channel.edit(user_limit=bench_channel.user_limit - 1)
-                except discord.HTTPException:
-                    pass
 
             state["teams"][team_id]["on_field"].add(incoming.id)
             db.add_team_member(team_id, incoming.id, "player")
@@ -1505,31 +1541,24 @@ class SessionCog(commands.Cog):
         Unlike request_sub, this doesn't require them to be on the Bench -
         it's for the case where a player is already active on one team but
         needs to move straight onto a different one. Shares the same
-        capacity-neutral VC math and Bench-lock enforcement as a sub.
+        TEAM_SIZE hard ceiling and Bench-lock enforcement as a sub.
         Returns (added: bool, moved: bool, reason: str | None) - added is
         False only if the hard cap blocked the transfer entirely (nothing
         changed); moved reflects whether the physical voice drag succeeded
         given the roster change did go through."""
-        # Same hard cap as Add Sub - a team can hold at most one sub beyond
-        # the normal 6 (7 max). Check this BEFORE touching anything, so a
+        # Same hard ceiling as Add Sub - a team can never exceed
+        # config.TEAM_SIZE players. Check this BEFORE touching anything, so a
         # blocked transfer doesn't still rip the player off their old team.
-        if len(state["teams"][dest_team_id]["on_field"]) >= config.TEAM_SIZE + 1:
+        if len(state["teams"][dest_team_id]["on_field"]) >= config.TEAM_SIZE:
             dest_club = state["teams"][dest_team_id]["club_name"]
-            return False, False, f"{dest_club} is already at its maximum of {config.TEAM_SIZE + 1} players"
+            return False, False, f"{dest_club} is already at its maximum of {config.TEAM_SIZE} players"
 
-        # remove from any other team they're currently on, shrinking that
-        # team's VC back down (never below the normal TEAM_SIZE floor)
+        # remove from any other team they're currently on
         stripped_captaincy_of = None
         for other_team_id, other_info in state["teams"].items():
             if other_team_id != dest_team_id and player_id in other_info["on_field"]:
                 other_info["on_field"].discard(player_id)
                 db.set_member_role(other_team_id, player_id, "sub")
-                other_channel = guild.get_channel(other_info["voice_channel_id"])
-                if other_channel and other_channel.user_limit > config.TEAM_SIZE:
-                    try:
-                        await other_channel.edit(user_limit=other_channel.user_limit - 1)
-                    except discord.HTTPException:
-                        pass
 
                 # A captain who transfers away loses that team's captaincy -
                 # they're no longer even rostered there, so it shouldn't
@@ -1545,10 +1574,6 @@ class SessionCog(commands.Cog):
                 break
 
         dest_channel = guild.get_channel(state["teams"][dest_team_id]["voice_channel_id"])
-        try:
-            await dest_channel.edit(user_limit=dest_channel.user_limit + 1)
-        except discord.HTTPException:
-            pass
 
         member = guild.get_member(player_id)
         moved, reason = False, "that user isn't in the bot's member cache for this server"
@@ -1619,9 +1644,10 @@ class SessionCog(commands.Cog):
     # -------------------------------------------------------------- full removal
     async def remove_player_from_roster(self, guild: discord.Guild, session_id: int, team_id: int, player_id: int):
         """Pulls a player off their team's roster entirely - not benched,
-        not transferred, just gone. Frees their seat (shrinking the team's
-        VC back down, same as any other departure) so someone else can
-        actually be subbed/transferred in without hitting the 7-player cap.
+        not transferred, just gone. Frees their seat on the roster so someone
+        else can actually be subbed/transferred in without hitting the
+        TEAM_SIZE hard ceiling (which also re-enables that team's Add sub
+        button, since every roster change goes through _refresh_team_roster).
         Unlike a transfer, captaincy is ALWAYS cleared here (no admin
         exemption) since they're not on any team anymore at all. Their
         Bench lock is lifted too, so if they come back later they can
@@ -1630,13 +1656,6 @@ class SessionCog(commands.Cog):
         info = state["teams"][team_id]
         info["on_field"].discard(player_id)
         db.set_member_role(team_id, player_id, "removed")
-
-        channel = guild.get_channel(info["voice_channel_id"])
-        if channel and channel.user_limit > config.TEAM_SIZE:
-            try:
-                await channel.edit(user_limit=channel.user_limit - 1)
-            except discord.HTTPException:
-                pass
 
         was_captain = info["captain_id"] == player_id
         if was_captain:
