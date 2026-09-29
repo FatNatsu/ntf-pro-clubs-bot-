@@ -429,15 +429,19 @@ class SessionControlPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
         self.session_id = session_id
-        self.sub_buttons = {}  # team_id -> its Add sub button, so they can be greyed out when a team is full
 
-        for team_id, info in teams.items():
-            btn = discord.ui.Button(
-                label=f"Add sub — {info['club_name']}", style=discord.ButtonStyle.secondary, emoji="🔁"
-            )
-            btn.callback = self._make_sub_callback(team_id, info["club_name"])
-            self.sub_buttons[team_id] = btn
-            self.add_item(btn)
+        # ONE button for the common case - it always represents whichever team is
+        # currently up (see sync_sub_buttons), rather than one button per team.
+        self.sub_button = discord.ui.Button(label="Add sub", style=discord.ButtonStyle.success, emoji="🔁")
+        self.sub_button.callback = self._make_sub_callback()
+        self.add_item(self.sub_button)
+
+        # Admins keep a way to pull for a DIFFERENT team than whoever's turn it
+        # is (an away captain, etc.) - the single button above always acts on
+        # the current turn, so this is the only way to override it now.
+        admin_sub_btn = discord.ui.Button(label="Admin: Pull For Team", style=discord.ButtonStyle.secondary, emoji="🛠️")
+        admin_sub_btn.callback = self._admin_sub_callback
+        self.add_item(admin_sub_btn)
 
         transfer_btn = discord.ui.Button(label="Transfer Player", style=discord.ButtonStyle.primary, emoji="🔄")
         transfer_btn.callback = self._transfer_callback
@@ -456,33 +460,69 @@ class SessionControlPanelView(discord.ui.View):
         self.add_item(end_btn)
 
     def sync_sub_buttons(self, teams, turn_team_id=None):
-        """Keeps each team's Add sub button in step with the sub rules:
-        - at the roster ceiling (config.TEAM_SIZE): greyed out, "Full".
-        - the team whose turn it is (fewest players): green, "your turn".
-        - any other team: still clickable but labelled "(wait)" - the turn is
-          enforced inside request_sub (so an admin can still override from
-          these same buttons), this is just the visible half so captains
-          can see at a glance who's up without clicking and getting told no."""
-        for team_id, btn in self.sub_buttons.items():
-            info = teams[team_id]
-            club = info["club_name"][:45]  # Discord caps button labels at 80 characters
-            if len(info["on_field"]) >= config.TEAM_SIZE:
-                btn.disabled = True
-                btn.label = f"Full — {club}"
-                btn.style = discord.ButtonStyle.secondary
-            elif team_id == turn_team_id:
-                btn.disabled = False
-                btn.label = f"Add sub — {club} ▶ your turn"
-                btn.style = discord.ButtonStyle.success
-            else:
-                btn.disabled = False
-                btn.label = f"Add sub — {club} (wait)"
-                btn.style = discord.ButtonStyle.secondary
+        """Keeps the single Add sub button in step with whoever's turn it is:
+        - nobody eligible (all full, or no captain): greyed out, "No sub available".
+        - otherwise: green, labelled with the on-turn team - clicking it always
+          acts on THAT team, resolved fresh at click time (see the callback), so
+          it can never go stale between being shown and being pressed.
+        The button doesn't hold a team_id itself for this reason - it's always a
+        live "whoever's up" pointer, not a fixed target."""
+        if turn_team_id is None:
+            self.sub_button.disabled = True
+            self.sub_button.label = "No sub available"
+            self.sub_button.style = discord.ButtonStyle.secondary
+        else:
+            info = teams[turn_team_id]
+            self.sub_button.disabled = False
+            self.sub_button.label = f"Add sub — {info['club_name'][:60]}"
+            self.sub_button.style = discord.ButtonStyle.success
 
-    def _make_sub_callback(self, team_id, club_name):
+    def _make_sub_callback(self):
         async def callback(interaction: discord.Interaction):
-            await self.cog.request_sub(interaction, self.session_id, team_id, club_name)
+            state = self.cog.active_sessions.get(self.session_id)
+            if not state:
+                await interaction.response.send_message("This session has ended.", ephemeral=True)
+                return
+            team_id = self.cog._sub_turn_team(state)
+            if team_id is None:
+                await interaction.response.send_message(
+                    "No team can take a sub right now (all full, or no captain).", ephemeral=True
+                )
+                return
+            await self.cog.request_sub(interaction, self.session_id, team_id, state["teams"][team_id]["club_name"])
         return callback
+
+    async def _admin_sub_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "Only an admin can pull a sub for a specific team out of turn — "
+                "use the green Add sub button above for the team that's actually up.",
+                ephemeral=True,
+            )
+            return
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        options = [
+            discord.SelectOption(label=info["club_name"], value=str(team_id))
+            for team_id, info in state["teams"].items() if len(info["on_field"]) < config.TEAM_SIZE
+        ]
+        if not options:
+            await interaction.response.send_message("Every team is already full.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=60)
+        select = discord.ui.Select(placeholder="Pull a sub for which team?", options=options)
+
+        async def on_select(select_interaction: discord.Interaction):
+            team_id = int(select.values[0])
+            await self.cog.request_sub(
+                select_interaction, self.session_id, team_id, state["teams"][team_id]["club_name"]
+            )
+
+        select.callback = on_select
+        view.add_item(select)
+        await interaction.response.send_message("Pick the team to pull a sub for:", view=view, ephemeral=True)
 
     async def _transfer_callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
