@@ -59,10 +59,11 @@ can post this panel; any player can then ready up from it.
 2. **Rivals** needs 12 ready, **League** needs 24. Once a mode hits its
    number, a **30-second countdown** starts (last chance to back out) before
    the bot locks it in.
-3. **League force start**: if League stalls, an admin can hit
-   **⚡ Force Start** on the ready-check message once **16+** are ready
-   (enough for 4 full teams of 4) — it skips the countdown and starts
-   immediately with however many are ready.
+3. **Force start**: if a queue stalls, an admin can hit **⚡ Force Start**
+   on the ready-check message once there are 3 per team — **12+** ready in
+   League, **6+** in Rivals. It skips the countdown and starts immediately
+   with however many are ready, split evenly (16 in League seats 4 per
+   team).
 4. **League auto-close**: if League never reaches 16 within **5 minutes** of
    the first person readying up, it auto-closes itself and announces it, so
    the channel doesn't sit clogged with a queue that's never going to pop —
@@ -96,10 +97,13 @@ can post this panel; any player can then ready up from it.
    loser. When the next round starts, the whole card set is replaced with
    a fresh one. **👀 Watch \<Club\>** buttons let anyone already in a voice
    channel spectate (auto-muted).
-9. Either team's captain (or an admin) can hit **🔁 Add sub** in
-   session-control — it just pulls a random player currently sitting in
-   Bench straight onto the team (no swap, no picking who comes off; it's
-   built for filling empty seats left by a force start).
+9. A team's captain (or an admin) can hit **🔁 Add sub** in
+   session-control — it pulls a player from Bench straight onto the team
+   (longest-waiting players first, best MMR fit among them; no swap, no
+   picking who comes off). Add sub only fills a team up to **6**. A team at
+   6 can take one more, to a hard maximum of **7**, only if its captain (or
+   an admin) presses **➕ Request 7th player** — and only once no other team
+   is still under 6.
 10. **MMR updates the moment each result is reported** — Elo-style, with the
     swing (K-factor) shrinking the higher a player's own rating is: full
     strength normally, smaller once they're A rank, smallest at S rank —
@@ -171,8 +175,9 @@ process without interfering with each other.
   end sessions before restarting the bot. Everything already reported
   (MMR, match/club history) is safe in the database regardless.
 - Force-start team size is `players_ready // num_teams`, so a 16-player
-  League force start seats 4 per team; the voice channels are still created
-  at the normal 6-player cap so subs can fill the rest later.
+  League force start seats 4 per team and a 12-player one seats 3; the
+  voice channels are still created at the 7-player hard cap so subs can
+  fill the rest later.
 - Round matchups use a standard round-robin **circle method** for League, so
   it's a genuine mini-league, not a random bracket.
 - The 5-minute League auto-close timer starts on the *first* person readying

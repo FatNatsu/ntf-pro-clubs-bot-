@@ -14,6 +14,13 @@ import voice_utils
 import leaderboard_utils
 
 
+def _ordinal(n: int) -> str:
+    """7 -> '7th'. Used so messages follow config.TEAM_SIZE if it ever changes."""
+    if 10 <= n % 100 <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
 class ScoreModal(discord.ui.Modal):
     """Popup asking for the scoreline once a captain/admin picks a winner.
     went_to_pens changes the labels to make clear this is the regulation
@@ -436,6 +443,14 @@ class SessionControlPanelView(discord.ui.View):
         self.sub_button.callback = self._make_sub_callback()
         self.add_item(self.sub_button)
 
+        # The 7th seat is a last resort and is never filled by the button
+        # above - a captain (or admin) has to ask for it explicitly here.
+        seventh_btn = discord.ui.Button(
+            label=f"Request {_ordinal(config.TEAM_SIZE)} player", style=discord.ButtonStyle.secondary, emoji="➕"
+        )
+        seventh_btn.callback = self._seventh_callback
+        self.add_item(seventh_btn)
+
         # Admins keep a way to pull for a DIFFERENT team than whoever's turn it
         # is (an away captain, etc.) - the single button above always acts on
         # the current turn, so this is the only way to override it now.
@@ -486,11 +501,59 @@ class SessionControlPanelView(discord.ui.View):
             team_id = self.cog._sub_turn_team(state)
             if team_id is None:
                 await interaction.response.send_message(
-                    "No team can take a sub right now (all full, or no captain).", ephemeral=True
+                    f"No team can take a sub right now (all at {config.NORMAL_TEAM_SIZE}, or no captain). "
+                    f"A captain can still use Request {_ordinal(config.TEAM_SIZE)} player.",
+                    ephemeral=True
                 )
                 return
             await self.cog.request_sub(interaction, self.session_id, team_id, state["teams"][team_id]["club_name"])
         return callback
+
+    async def _seventh_callback(self, interaction: discord.Interaction):
+        """Captain: asks for the extra player for their OWN team. Admin who
+        isn't a captain in this session: picks which team gets one."""
+        state = self.cog.active_sessions.get(self.session_id)
+        if not state:
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        own_team_id = next(
+            (team_id for team_id, info in state["teams"].items() if info["captain_id"] == interaction.user.id), None
+        )
+        if own_team_id is not None:
+            await self.cog.request_sub(
+                interaction, self.session_id, own_team_id, state["teams"][own_team_id]["club_name"], extra=True
+            )
+            return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                f"Only a team's captain (or an admin) can request a {_ordinal(config.TEAM_SIZE)} player.",
+                ephemeral=True,
+            )
+            return
+        options = [
+            discord.SelectOption(label=info["club_name"], value=str(team_id))
+            for team_id, info in state["teams"].items()
+            if config.NORMAL_TEAM_SIZE <= len(info["on_field"]) < config.TEAM_SIZE
+        ]
+        if not options:
+            await interaction.response.send_message(
+                f"No team is sitting at {config.NORMAL_TEAM_SIZE} right now, so nobody can take a "
+                f"{_ordinal(config.TEAM_SIZE)} player.",
+                ephemeral=True,
+            )
+            return
+        view = discord.ui.View(timeout=60)
+        select = discord.ui.Select(placeholder=f"{_ordinal(config.TEAM_SIZE)} player for which team?", options=options)
+
+        async def on_select(select_interaction: discord.Interaction):
+            team_id = int(select.values[0])
+            await self.cog.request_sub(
+                select_interaction, self.session_id, team_id, state["teams"][team_id]["club_name"], extra=True
+            )
+
+        select.callback = on_select
+        view.add_item(select)
+        await interaction.response.send_message("Pick the team:", view=view, ephemeral=True)
 
     async def _admin_sub_callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
@@ -506,10 +569,14 @@ class SessionControlPanelView(discord.ui.View):
             return
         options = [
             discord.SelectOption(label=info["club_name"], value=str(team_id))
-            for team_id, info in state["teams"].items() if len(info["on_field"]) < config.TEAM_SIZE
+            for team_id, info in state["teams"].items() if len(info["on_field"]) < config.NORMAL_TEAM_SIZE
         ]
         if not options:
-            await interaction.response.send_message("Every team is already full.", ephemeral=True)
+            await interaction.response.send_message(
+                f"Every team already has {config.NORMAL_TEAM_SIZE} — use Request "
+                f"{_ordinal(config.TEAM_SIZE)} player if a team needs one more.",
+                ephemeral=True,
+            )
             return
         view = discord.ui.View(timeout=60)
         select = discord.ui.Select(placeholder="Pull a sub for which team?", options=options)
@@ -742,13 +809,14 @@ class SessionCog(commands.Cog):
         """Teams that can take a sub right now, in the order they'll get to
         pull one: fewest players first, ties broken by a FIXED team order
         (the order the teams were created in) - so as teams fill up it
-        cycles A -> B -> C -> D -> A rather than jumping around. Teams at the
-        roster ceiling are left out (they can't take anyone), as are teams
+        cycles A -> B -> C -> D -> A rather than jumping around. Teams already
+        at config.NORMAL_TEAM_SIZE are left out (the seat above that is only
+        ever filled on an explicit request, never by turn), as are teams
         with no captain (nobody there could press the button - an admin can
         still pull for them)."""
         order = []
         for idx, (team_id, info) in enumerate(state["teams"].items()):
-            if len(info["on_field"]) >= config.TEAM_SIZE:
+            if len(info["on_field"]) >= config.NORMAL_TEAM_SIZE:
                 continue
             if info["captain_id"] is None:
                 continue
@@ -865,10 +933,19 @@ class SessionCog(commands.Cog):
                 f"{teams[t]['club_name']} ({len(teams[t]['on_field'])})" for t in order
             ))
         else:
-            lines.append("No team can take a sub right now (all full, or no captain).")
+            lines.append(f"No team can take a sub right now (all at {config.NORMAL_TEAM_SIZE}, or no captain).")
+        at_normal = [
+            info["club_name"] for info in teams.values()
+            if config.NORMAL_TEAM_SIZE <= len(info["on_field"]) < config.TEAM_SIZE
+        ]
+        if at_normal:
+            lines.append(
+                f"✅ At {config.NORMAL_TEAM_SIZE}: {', '.join(at_normal)} — their captain can "
+                f"request a {_ordinal(config.TEAM_SIZE)} player if needed"
+            )
         full = [info["club_name"] for info in teams.values() if len(info["on_field"]) >= config.TEAM_SIZE]
         if full:
-            lines.append(f"🔒 Full: {', '.join(full)}")
+            lines.append(f"🔒 Full ({config.TEAM_SIZE}): {', '.join(full)}")
         lines.append("")
 
         waiting = self._bench_waiting(state, guild)
@@ -1670,14 +1747,41 @@ class SessionCog(commands.Cog):
         await self.end_session(session_id, ended_by=None, natural_completion=True)
 
     # -------------------------------------------------------------- subs
-    async def request_sub(self, interaction: discord.Interaction, session_id, team_id, club_name):
+    def _sub_blocked_reason(self, state, team_id, club_name, extra, full_msg):
+        """Why this team can't take a player through this path right now, or
+        None if it can. Normal subs stop at NORMAL_TEAM_SIZE; the extra
+        (7th player) request only applies to a team sitting between
+        NORMAL_TEAM_SIZE and the TEAM_SIZE ceiling."""
+        size = len(state["teams"][team_id]["on_field"])
+        if size >= config.TEAM_SIZE:
+            return full_msg
+        if extra and size < config.NORMAL_TEAM_SIZE:
+            return (
+                f"{club_name} only has {size} — use the green Add sub button until the team is at "
+                f"{config.NORMAL_TEAM_SIZE}. The {_ordinal(config.TEAM_SIZE)} player is a last resort after that."
+            )
+        if not extra and size >= config.NORMAL_TEAM_SIZE:
+            return (
+                f"{club_name} already has {config.NORMAL_TEAM_SIZE} players. If you really need one more, "
+                f"the captain can press **Request {_ordinal(config.TEAM_SIZE)} player** "
+                f"(maximum {config.TEAM_SIZE} per team)."
+            )
+        return None
+
+    async def request_sub(self, interaction: discord.Interaction, session_id, team_id, club_name, extra: bool = False):
         """Pulls a player from the Bench VC onto the requesting team: the
         longest-waiting players form the pool and MMR balancing picks the best
         fit for that team from it (see _pick_sub; an NA team only considers
         waiting NA players first). It has to be that team's turn - the team
         with the fewest players goes first - unless an admin is the one
-        clicking. No swapping: this adds to the roster, up to the
-        config.TEAM_SIZE ceiling."""
+        clicking. No swapping: this adds to the roster, up to
+        config.NORMAL_TEAM_SIZE.
+
+        extra=True is the "Request 7th player" path: it fills the one seat
+        between NORMAL_TEAM_SIZE and the config.TEAM_SIZE ceiling. It only
+        works for a team already at NORMAL_TEAM_SIZE, and it waits until no
+        other team is still short of that size (those teams get the Bench
+        first), unless an admin is the one clicking."""
         # Acknowledge the button press IMMEDIATELY, before any of the slower
         # Discord API calls below (channel edit, permission grant, member
         # move) - otherwise Discord's 3-second interaction window can expire
@@ -1705,8 +1809,9 @@ class SessionCog(commands.Cog):
             f"{club_name} is already at its maximum of {config.TEAM_SIZE} players — "
             f"a slot only opens up if someone is removed from the roster or transferred out."
         )
-        if len(state["teams"][team_id]["on_field"]) >= config.TEAM_SIZE:
-            await interaction.followup.send(full_msg, ephemeral=True)
+        blocked = self._sub_blocked_reason(state, team_id, club_name, extra, full_msg)
+        if blocked:
+            await interaction.followup.send(blocked, ephemeral=True)
             return
 
         async with state["sub_lock"]:
@@ -1719,15 +1824,28 @@ class SessionCog(commands.Cog):
             # Re-check now that we hold the lock. Two quick clicks can both pass the
             # early check above before either one finishes - which would otherwise
             # push a team past the ceiling, or let one team pull twice in a row.
-            if len(state["teams"][team_id]["on_field"]) >= config.TEAM_SIZE:
-                await interaction.followup.send(full_msg, ephemeral=True)
+            blocked = self._sub_blocked_reason(state, team_id, club_name, extra, full_msg)
+            if blocked:
+                await interaction.followup.send(blocked, ephemeral=True)
                 return
 
             # Turn order: the team with the fewest players pulls next (fixed team
             # order on ties), so captains never argue over who's up. Admins can pull
             # for any team - the way past a captain who's away.
             turn_order = self._sub_turn_order(state)
-            if turn_order and team_id != turn_order[0] and not is_admin:
+            if extra and turn_order and not is_admin:
+                # The extra seat is a last resort: teams still short of the
+                # normal size get the Bench first.
+                short = ", ".join(
+                    f"{state['teams'][t]['club_name']} ({len(state['teams'][t]['on_field'])})" for t in turn_order
+                )
+                await interaction.followup.send(
+                    f"⏳ A {_ordinal(config.TEAM_SIZE)} player has to wait — these teams are still under "
+                    f"{config.NORMAL_TEAM_SIZE} and go first: {short}. An admin can override.",
+                    ephemeral=True,
+                )
+                return
+            if not extra and turn_order and team_id != turn_order[0] and not is_admin:
                 turn_team = state["teams"][turn_order[0]]
                 place = f" **{club_name}** is #{turn_order.index(team_id) + 1} in line." if team_id in turn_order else ""
                 await interaction.followup.send(
@@ -1788,11 +1906,13 @@ class SessionCog(commands.Cog):
                 await voice_utils.allow_member_in_channel(bench_channel, incoming, connect=False)
 
         progress_channel = guild.get_channel(state["progress_channel_id"])
-        await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench.")
+        joined_as = f" as their {_ordinal(config.TEAM_SIZE)} player" if extra else ""
+        await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench{joined_as}.")
         await self._refresh_team_roster(session_id)
         await self._log_action(
             session_id,
-            f"🔁 <@{interaction.user.id}> requested a sub for **{club_name}** — <@{incoming.id}> came on.",
+            f"🔁 <@{interaction.user.id}> requested a {'extra (' + _ordinal(config.TEAM_SIZE) + ') player' if extra else 'sub'} "
+            f"for **{club_name}** — <@{incoming.id}> came on.",
         )
 
         next_team_id = self._sub_turn_team(state)
