@@ -124,7 +124,7 @@ K_FACTORS = {
 }
 
 # Rank floor thresholds, low to high. Starting MMR (500) lands new players
-# in D. Top is S+ at 2500 MMR.
+# in D. Top is S+ at 1500 MMR.
 RANK_THRESHOLDS = [
     ("G", 200),
     ("F", 300),

@@ -59,6 +59,12 @@ can post this panel; any player can then ready up from it.
    a dedicated **ready-check message** for that mode with a live list, so
    from then on players can ready up directly from that message too instead
    of going back to the main panel.
+   The panel shows each mode's count, a progress bar, its status and its
+   rules. Admins can **⏸️ Pause Queue** on a mode's ready check: nobody new
+   can ready up and a running start countdown stops, but everyone already
+   readied stays in (and can still leave). **▶️ Resume Queue** puts it back;
+   if the queue is full the countdown starts again. League and Rivals pause
+   separately.
 2. **League** needs 24 ready (4 teams of 6), **Rivals** needs 22 (2 teams
    of 11). The two modes have separate sizes throughout. Once a mode hits its
    number, a **30-second countdown** starts (last chance to back out) before
@@ -155,7 +161,7 @@ can post this panel; any player can then ready up from it.
     strength normally, smaller once they're A rank, smallest at S rank —
     so wins/losses matter less individually near the top and the ladder
     stays stable. By the time the last match is in, every player's MMR for
-    the session is already settled. S rank starts at 2500 MMR.
+    the session is already settled. S rank starts at 1,100 MMR and S+ at 1,500.
 11. **Admins** run the session from the **admin log** channel. When a
     session starts the bot posts there: a pinned **live status** message
     (each game in the current round: waiting / LIVE / finished with the
@@ -175,6 +181,16 @@ can post this panel; any player can then ready up from it.
     The admin panel is removed and the final status stays in the admin log
     as part of the record.
 
+### Look: banners and colours
+
+Panels carry a banner strip on top and an accent colour down the left edge:
+cyan for League, purple for Rivals, grey-blue for admin and shared panels.
+The banner pictures live in `assets/banners/` (`queue`, `ready_check_league`,
+`ready_check_rivals`, `match`, `captains`, `sub_queue`, and later `admin`,
+`session_history`). A banner that isn't there yet is simply skipped, so
+adding one is just dropping a `.jpg` with the right name into that folder.
+The shared helpers are in `ui.py`.
+
 ## 5. Stats & leaderboard, anywhere, anytime
 
 ```
@@ -190,14 +206,15 @@ after every reported result.
 
 | Rank | MMR floor |
 |------|-----------|
-| G    | 0         |
-| F    | 1000      |
-| E    | 1200 (start) |
-| D    | 1400      |
-| C    | 1700      |
-| B    | 2000      |
-| A    | 2300      |
-| S    | 2500      |
+| G    | 200       |
+| F    | 300       |
+| E    | 400       |
+| D    | 500 (start) |
+| C    | 600       |
+| B    | 700       |
+| A    | 900       |
+| S    | 1100      |
+| S+   | 1500      |
 
 Only individual players carry MMR — clubs/teams only ever have plain
 win/loss records (see `/club_stats`). K-factor: 32 normally, 20 once you're

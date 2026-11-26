@@ -12,6 +12,7 @@ import mmr
 import team_balance
 import voice_utils
 import leaderboard_utils
+import ui
 
 
 def _ordinal(n: int) -> str:
@@ -1049,7 +1050,7 @@ class SessionCog(commands.Cog):
         embed = discord.Embed(
             title="🔁 Sub Queue",
             description=self._sub_queue_text(state, guild)[:4000],
-            color=discord.Color.blurple(),
+            color=ui.accent(state["mode"]),
         )
         embed.set_footer(text="Updates live. Only the team whose turn it is can pull a sub — admins can override.")
         return embed
@@ -1063,16 +1064,19 @@ class SessionCog(commands.Cog):
         guild = self.bot.get_guild(state["guild_id"])
         if not guild:
             return
-        messages = list(state.get("sub_queue_messages", []))
-        messages += [slot["sub_queue_message"] for slot in state["slots"] if slot.get("sub_queue_message")]
-        if not messages:
-            return
         embed = self._build_sub_queue_embed(state, guild)
-        for message in messages:
+        # the public copy carries the banner; the captains' copies are plain
+        for message in state.get("sub_queue_messages", []):
             try:
-                await message.edit(embed=embed)
+                await message.edit(**ui.edit_kwargs("sub_queue", embed))
             except discord.HTTPException:
                 pass
+        for slot in state["slots"]:
+            if slot.get("sub_queue_message"):
+                try:
+                    await slot["sub_queue_message"].edit(embed=embed)
+                except discord.HTTPException:
+                    pass
 
     def _schedule_sub_queue_refresh(self, session_id):
         """Refreshes the Sub Queue message shortly from now, batching a burst
@@ -1381,7 +1385,7 @@ class SessionCog(commands.Cog):
         # longest-waiting-first order, so benched players can see their place.
         try:
             session_state["sub_queue_messages"].append(
-                await sub_queue_channel.send(embed=self._build_sub_queue_embed(session_state, guild))
+                await sub_queue_channel.send(**ui.send_kwargs("sub_queue", self._build_sub_queue_embed(session_state, guild)))
             )
         except discord.HTTPException:
             pass
@@ -1484,7 +1488,7 @@ class SessionCog(commands.Cog):
         embed = discord.Embed(
             title=f"Match {slot['n']} • Round {slot['round_no']}: {' vs '.join(clubs)}",
             description=self._match_status_text(state, match) if match else None,
-            color=discord.Color.blurple(),
+            color=ui.accent(state["mode"]),
         )
         for team_id in slot["team_ids"]:
             info = state["teams"][team_id]
@@ -1604,7 +1608,8 @@ class SessionCog(commands.Cog):
         if public_channel:
             watch_view = SpectateView(self, session_id, [(team_a_id, club_a), (team_b_id, club_b)])
             slot["public_message"] = await self._send_with_retry(
-                public_channel.send, embed=self._build_match_embed(session_id, slot, match), view=watch_view
+                public_channel.send, **ui.send_kwargs("match", self._build_match_embed(session_id, slot, match)),
+                view=watch_view,
             )
 
         # captains channel: round divider, the result buttons, then the roster
@@ -1621,7 +1626,7 @@ class SessionCog(commands.Cog):
         control_embed = discord.Embed(
             title=f"Round {round_no} • Match {n}/{total}: {club_a} vs {club_b}",
             description="Captains: press **Match Live** at kick-off, then click the winner once the game finishes.",
-            color=discord.Color.orange(),
+            color=ui.accent(state["mode"]),
         )
         for team_id in (team_a_id, team_b_id):
             info = state["teams"][team_id]
@@ -1633,7 +1638,7 @@ class SessionCog(commands.Cog):
                 inline=True,
             )
         match_view = MatchControlView(self, session_id, match["id"], team_a_id, club_a, team_b_id, club_b)
-        await self._send_with_retry(captains_channel.send, embed=control_embed, view=match_view)
+        await self._send_with_retry(captains_channel.send, **ui.send_kwargs("captains", control_embed), view=match_view)
 
         panel_view = CaptainPanelView(self, session_id, state["mode"])
         panel_view.sync_sub_buttons(state["teams"], self._sub_turn_team(state))
@@ -1651,7 +1656,7 @@ class SessionCog(commands.Cog):
         title = f"Session #{session_id} — {state['mode'].title()} — Round {round_no}/{state['total_rounds']}"
         embed = discord.Embed(
             title=title + (" — ended" if ended else ""),
-            color=discord.Color.dark_grey() if ended else discord.Color.green(),
+            color=discord.Color.dark_grey() if ended else ui.accent("neutral"),
         )
         for n, match in enumerate(matches, start=1):
             info_a = state["teams"][match["team_a_id"]]
@@ -1678,7 +1683,7 @@ class SessionCog(commands.Cog):
         if not channel:
             return
         try:
-            status_message = await channel.send(embed=self._build_admin_status_embed(session_id))
+            status_message = await channel.send(**ui.send_kwargs("admin", self._build_admin_status_embed(session_id)))
             view = AdminPanelView(self, session_id)
             panel_message = await channel.send(f"🛠️ **Session #{session_id} — admin controls**", view=view)
         except discord.HTTPException:
@@ -1701,14 +1706,14 @@ class SessionCog(commands.Cog):
         status_message = state.get("admin_status_message")
         if status_message:
             try:
-                await status_message.edit(embed=self._build_admin_status_embed(session_id))
+                await status_message.edit(**ui.edit_kwargs("admin", self._build_admin_status_embed(session_id)))
             except discord.HTTPException:
                 pass
         for slot in state["slots"]:
             message = slot.get("public_message")
             if message and slot["team_ids"]:
                 try:
-                    await message.edit(embed=self._build_match_embed(session_id, slot))
+                    await message.edit(**ui.edit_kwargs("match", self._build_match_embed(session_id, slot)))
                 except discord.HTTPException:
                     pass
 
@@ -1823,6 +1828,13 @@ class SessionCog(commands.Cog):
             except discord.DiscordServerError as e:
                 last_exc = e
                 if attempt < retries:
+                    if "file" in kwargs:
+                        # an attached file can only be sent once - retry the
+                        # same panel without its banner rather than fail
+                        kwargs.pop("file")
+                        embeds = kwargs.pop("embeds", None)
+                        if embeds:
+                            kwargs["embed"] = embeds[-1]
                     await asyncio.sleep(delay)
         raise last_exc
 
@@ -2069,7 +2081,7 @@ class SessionCog(commands.Cog):
             history_embed = discord.Embed(
                 title=f"Session #{session_id} — Final Standings",
                 description="\n".join(lines),
-                color=discord.Color.gold(),
+                color=ui.accent(state["mode"]),
             )
             results = self._results_text(session_id)
             if results:
@@ -2077,7 +2089,7 @@ class SessionCog(commands.Cog):
             try:
                 await history_channel.send(
                     f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>.",
-                    embed=history_embed,
+                    **ui.send_kwargs("session_history", history_embed),
                 )
             except discord.HTTPException:
                 pass
@@ -2485,7 +2497,7 @@ class SessionCog(commands.Cog):
         status_message = state.get("admin_status_message")
         if status_message:
             try:
-                await status_message.edit(embed=self._build_admin_status_embed(session_id, ended=True))
+                await status_message.edit(**ui.edit_kwargs("admin", self._build_admin_status_embed(session_id, ended=True)))
                 await status_message.unpin()
             except discord.HTTPException:
                 pass

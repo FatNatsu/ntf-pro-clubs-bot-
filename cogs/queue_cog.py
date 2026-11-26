@@ -9,6 +9,7 @@ from discord.ext import commands
 
 import config
 import database as db
+import ui
 
 log = logging.getLogger("ntf")
 
@@ -60,32 +61,49 @@ class PlatformPickView(discord.ui.View):
 
 class ReadyMessageView(discord.ui.View):
     """The dedicated per-mode ready-check message. Stays up to date as
-    players ready up or leave; League also gets an admin Force Start button."""
+    players ready up or leave. Admins also get Force Start and Pause Queue."""
 
-    def __init__(self, cog: "QueueCog", mode: str):
+    def __init__(self, cog: "QueueCog", mode: str, paused: bool = False):
         super().__init__(timeout=None)
         self.cog = cog
         self.mode = mode
 
-        console_btn = discord.ui.Button(label="Ready Up (Console)", style=discord.ButtonStyle.success, emoji="🎮")
-        pc_btn = discord.ui.Button(label="Ready Up (PC)", style=discord.ButtonStyle.success, emoji="🖥️")
-        leave_btn = discord.ui.Button(label="Not Ready / Leave", style=discord.ButtonStyle.danger, emoji="🚪")
+        self.console_btn = discord.ui.Button(label="Ready Up (Console)", style=discord.ButtonStyle.success, emoji="🎮", row=0)
+        self.pc_btn = discord.ui.Button(label="Ready Up (PC)", style=discord.ButtonStyle.success, emoji="🖥️", row=0)
+        leave_btn = discord.ui.Button(label="Not Ready / Leave", style=discord.ButtonStyle.danger, emoji="🚪", row=0)
 
-        console_btn.callback = self._make_ready_cb("Console")
-        pc_btn.callback = self._make_ready_cb("PC")
+        self.console_btn.callback = self._make_ready_cb("Console")
+        self.pc_btn.callback = self._make_ready_cb("PC")
         leave_btn.callback = self._leave_cb
 
-        self.add_item(console_btn)
-        self.add_item(pc_btn)
+        self.add_item(self.console_btn)
+        self.add_item(self.pc_btn)
         self.add_item(leave_btn)
 
+        self.force_btn = None
         if mode in config.FORCE_START_MIN:
-            force_btn = discord.ui.Button(
-                label=f"⚡ Force Start (Admin, {config.FORCE_START_MIN[mode]}+)",
-                style=discord.ButtonStyle.secondary,
+            self.force_btn = discord.ui.Button(
+                label=f"Force Start (Admin, {config.FORCE_START_MIN[mode]}+)",
+                style=discord.ButtonStyle.primary, emoji="⚡", row=1,
             )
-            force_btn.callback = self._force_start_cb
-            self.add_item(force_btn)
+            self.force_btn.callback = self._force_start_cb
+            self.add_item(self.force_btn)
+
+        self.pause_btn = discord.ui.Button(label="Pause Queue", style=discord.ButtonStyle.secondary, emoji="⏸️", row=1)
+        self.pause_btn.callback = self._pause_cb
+        self.add_item(self.pause_btn)
+        self.set_paused(paused)
+
+    def set_paused(self, paused: bool):
+        """While a queue is paused nobody new can ready up, so those buttons
+        (and Force Start) grey out and the pause button becomes Resume.
+        Leaving is always allowed."""
+        self.console_btn.disabled = paused
+        self.pc_btn.disabled = paused
+        if self.force_btn:
+            self.force_btn.disabled = paused
+        self.pause_btn.label = "Resume Queue" if paused else "Pause Queue"
+        self.pause_btn.emoji = "▶️" if paused else "⏸️"
 
     def _make_ready_cb(self, platform):
         async def cb(interaction: discord.Interaction):
@@ -97,6 +115,9 @@ class ReadyMessageView(discord.ui.View):
 
     async def _force_start_cb(self, interaction: discord.Interaction):
         await self.cog.handle_force_start(interaction, self.mode)
+
+    async def _pause_cb(self, interaction: discord.Interaction):
+        await self.cog.handle_pause(interaction, self.mode)
 
 
 class QueueCog(commands.Cog):
@@ -111,8 +132,9 @@ class QueueCog(commands.Cog):
     def _mode_state(self, guild_id: int, mode: str):
         guild_state = self.state.setdefault(guild_id, {})
         return guild_state.setdefault(mode, {
-            "ready": [], "platforms": {}, "message": None,
+            "ready": [], "platforms": {}, "message": None, "view": None,
             "countdown_task": None, "timeout_task": None,
+            "paused_by": None,  # admin's user id while this mode's queue is paused
         })
 
     def _resolve_panel_channel_id(self, guild_id: int):
@@ -146,7 +168,7 @@ class QueueCog(commands.Cog):
         #ntf-queue channel from /ntf_setup."""
         self.panel_channel[guild.id] = channel.id
         embed = self._build_panel_embed(guild.id)
-        message = await channel.send(embed=embed, view=QueuePanelView(self))
+        message = await channel.send(**ui.send_kwargs("queue", embed), view=QueuePanelView(self))
         self.panel_message[guild.id] = message
         return message
 
@@ -173,22 +195,45 @@ class QueueCog(commands.Cog):
         self.panel_message.pop(guild.id, None)
         await self.ensure_panel_in_channel(guild, channel)
 
+    def _mode_status_text(self, state: dict) -> str:
+        if state.get("paused_by"):
+            return "⏸️ Paused"
+        if state.get("countdown_task") is not None:
+            return "🚀 Starting"
+        return "⏳ Waiting"
+
     def _build_panel_embed(self, guild_id: int):
-        rivals = self._mode_state(guild_id, "rivals")
-        league = self._mode_state(guild_id, "league")
         embed = discord.Embed(
             title="🎮 NTF Pro Clubs Queue",
             description=(
                 "Pick a mode below to ready up. Once a queue fills, teams are drafted, "
                 "club voice channels are created automatically, and you'll get "
-                "dragged straight into your team's VC.\n\n"
-                "**Make sure you're already sitting in a voice channel before the queue pops** — "
-                "Discord only lets the bot move players who are already in voice."
+                "dragged straight into your team's VC."
             ),
-            color=discord.Color.green(),
+            color=ui.accent("neutral"),
         )
-        embed.add_field(name="⚔️ Rivals (2 teams)", value=f"{len(rivals['ready'])}/{config.QUEUE_CAP['rivals']} ready", inline=True)
-        embed.add_field(name="🏆 League (4 teams)", value=f"{len(league['ready'])}/{config.QUEUE_CAP['league']} ready", inline=True)
+        for mode, heading, players_line in (
+            ("rivals", "⚔️ Rivals", f"{config.starting_team_size('rivals')} per team"),
+            ("league", "🏆 League", (
+                f"{config.normal_team_size('league')} + "
+                f"{config.team_cap('league') - config.normal_team_size('league')} on request"
+            )),
+        ):
+            state = self._mode_state(guild_id, mode)
+            ready, cap = len(state["ready"]), config.QUEUE_CAP[mode]
+            embed.add_field(
+                name=heading,
+                value=(
+                    f"**{ready}/{cap} ready**\n"
+                    f"{ui.bar(ready, cap)}\n"
+                    f"**Status:** {self._mode_status_text(state)}\n"
+                    f"**Teams:** {config.MODE_TEAMS[mode]} teams\n"
+                    f"**Players:** {players_line}\n"
+                    f"**Force start:** {config.FORCE_START_MIN[mode]}+ ready"
+                ),
+                inline=True,
+            )
+        embed.set_footer(text="Connect to any voice channel before the queue pops — the bot can only move players already in voice.")
         return embed
 
     async def _refresh_panel_message(self, guild_id: int):
@@ -196,18 +241,27 @@ class QueueCog(commands.Cog):
         if not msg:
             return
         try:
-            await msg.edit(embed=self._build_panel_embed(guild_id))
+            await msg.edit(**ui.edit_kwargs("queue", self._build_panel_embed(guild_id)))
         except discord.HTTPException:
             pass
 
     # -------------------------------------------------------- ready message
     def _build_ready_embed(self, mode: str, state: dict, note: str = None):
         cap = config.QUEUE_CAP[mode]
+        ready = len(state["ready"])
         title = f"{'⚔️' if mode == 'rivals' else '🏆'} NTF {mode.title()} Ready Check"
         lines = [f"{PLATFORM_ICONS[state['platforms'][pid]]} <@{pid}>" for pid in state["ready"]]
-        desc = note or f"**{len(state['ready'])}/{cap} ready**"
-        embed = discord.Embed(title=title, description=desc, color=discord.Color.blue())
-        embed.add_field(name="Readied up", value="\n".join(lines) if lines else "*nobody yet*", inline=False)
+        if state.get("paused_by"):
+            note = (
+                f"⏸️ **Queue paused by <@{state['paused_by']}>**\n"
+                f"Nobody new can ready up while it's paused. The start countdown is stopped, "
+                f"and players who have already readied stay in the queue."
+            )
+        desc = f"{ui.bar(ready, cap)}  **{ready}/{cap} ready**"
+        if note:
+            desc = f"{note}\n\n{desc}"
+        embed = discord.Embed(title=title, description=desc, color=ui.accent(mode))
+        embed.add_field(name=f"Readied up ({ready})", value="\n".join(lines) if lines else "*nobody yet*", inline=False)
         if mode in config.FORCE_START_MIN:
             embed.set_footer(text=f"Admins can Force Start once {config.FORCE_START_MIN[mode]}+ are ready.")
         return embed
@@ -215,17 +269,26 @@ class QueueCog(commands.Cog):
     async def _refresh_ready_message(self, guild: discord.Guild, mode: str, note: str = None):
         state = self._mode_state(guild.id, mode)
         embed = self._build_ready_embed(mode, state, note)
+        banner = f"ready_check_{mode}"
         channel_id = self._resolve_panel_channel_id(guild.id)
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel is None:
             return
+
+        async def post_new():
+            state["view"] = ReadyMessageView(self, mode, paused=bool(state.get("paused_by")))
+            state["message"] = await channel.send(**ui.send_kwargs(banner, embed), view=state["view"])
+
         if state["message"] is None:
-            state["message"] = await channel.send(embed=embed, view=ReadyMessageView(self, mode))
+            await post_new()
         else:
+            view = state.get("view")
+            if view:
+                view.set_paused(bool(state.get("paused_by")))
             try:
-                await state["message"].edit(embed=embed)
+                await state["message"].edit(**ui.edit_kwargs(banner, embed), view=view)
             except discord.HTTPException:
-                state["message"] = await channel.send(embed=embed, view=ReadyMessageView(self, mode))
+                await post_new()
 
     def _reset_mode_state(self, guild_id: int, mode: str):
         state = self._mode_state(guild_id, mode)
@@ -237,8 +300,10 @@ class QueueCog(commands.Cog):
         state["ready"] = []
         state["platforms"] = {}
         state["message"] = None
+        state["view"] = None
         state["countdown_task"] = None
         state["timeout_task"] = None
+        state["paused_by"] = None
         return old_message
 
     # ---------------------------------------------------------- join / ready
@@ -250,6 +315,13 @@ class QueueCog(commands.Cog):
         state = self._mode_state(guild.id, mode)
         other_mode = "league" if mode == "rivals" else "rivals"
         other_state = self._mode_state(guild.id, other_mode)
+
+        if state.get("paused_by") and user.id not in state["ready"]:
+            await interaction.response.send_message(
+                f"⏸️ The {mode.title()} queue is paused by an admin — you can ready up once it's resumed.",
+                ephemeral=True,
+            )
+            return
 
         if len(state["ready"]) >= config.QUEUE_CAP[mode] and user.id not in state["ready"]:
             await interaction.response.send_message("That queue just filled up — wait for the next one!", ephemeral=True)
@@ -272,8 +344,40 @@ class QueueCog(commands.Cog):
         await self._refresh_ready_message(guild, mode)
         await self._refresh_panel_message(guild.id)
 
-        if len(state["ready"]) >= config.QUEUE_CAP[mode] and state["countdown_task"] is None:
+        if len(state["ready"]) >= config.QUEUE_CAP[mode] and state["countdown_task"] is None and not state.get("paused_by"):
             await self._begin_countdown(guild, mode)
+
+    async def handle_pause(self, interaction: discord.Interaction, mode: str):
+        """Admin-only. Pausing freezes ONE mode's queue exactly as it is:
+        nobody new can ready up and a running start countdown is stopped,
+        but everyone already readied stays in. Resuming puts it straight
+        back - and if the queue is full, the countdown starts again.
+        League and Rivals pause separately."""
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("Only an admin can pause or resume the queue.", ephemeral=True)
+            return
+        guild = interaction.guild
+        state = self._mode_state(guild.id, mode)
+        if state.get("paused_by"):
+            state["paused_by"] = None
+            await interaction.response.send_message(f"▶️ {mode.title()} queue resumed.", ephemeral=True)
+            await self._refresh_ready_message(guild, mode)
+            await self._refresh_panel_message(guild.id)
+            if len(state["ready"]) >= config.QUEUE_CAP[mode] and state["countdown_task"] is None:
+                await self._begin_countdown(guild, mode)
+            return
+
+        state["paused_by"] = interaction.user.id
+        task = state.get("countdown_task")
+        if task and not task.done():
+            task.cancel()
+        state["countdown_task"] = None
+        await interaction.response.send_message(
+            f"⏸️ {mode.title()} queue paused. Players already readied stay in; press Resume Queue to carry on.",
+            ephemeral=True,
+        )
+        await self._refresh_ready_message(guild, mode)
+        await self._refresh_panel_message(guild.id)
 
     async def handle_leave(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -313,6 +417,7 @@ class QueueCog(commands.Cog):
             state["timeout_task"] = None
         await self._refresh_ready_message(guild, mode, note=f"🚀 **Queue full! Starting in {config.READY_COUNTDOWN_SECONDS} seconds...**")
         state["countdown_task"] = asyncio.create_task(self._countdown_then_start(guild, mode))
+        await self._refresh_panel_message(guild.id)
 
     async def _countdown_then_start(self, guild: discord.Guild, mode: str):
         await asyncio.sleep(config.READY_COUNTDOWN_SECONDS)
@@ -327,6 +432,9 @@ class QueueCog(commands.Cog):
             await interaction.response.send_message("Only an admin can force start.", ephemeral=True)
             return
         state = self._mode_state(interaction.guild_id, mode)
+        if state.get("paused_by"):
+            await interaction.response.send_message("The queue is paused — resume it before force starting.", ephemeral=True)
+            return
         minimum = config.FORCE_START_MIN.get(mode)
         if minimum is None or len(state["ready"]) < minimum:
             await interaction.response.send_message(f"Need at least {minimum} ready players to force start.", ephemeral=True)
