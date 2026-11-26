@@ -7,6 +7,7 @@ from discord.ext import commands
 import database as db
 import mmr
 import leaderboard_utils
+import season
 
 LEADERBOARD_PAGE_SIZE = 25
 
@@ -70,6 +71,8 @@ class MMRCog(commands.Cog):
         embed.add_field(name="MMR", value=str(stats["mmr"]), inline=True)
         embed.add_field(name="Record", value=f"{stats['wins']}W - {stats['losses']}L", inline=True)
         embed.add_field(name="Progress", value=mmr.rank_progress_bar(stats["mmr"]), inline=False)
+        if season.crown_holder(interaction.guild_id, mode) == member.id:
+            embed.add_field(name="👑 Golden Crown", value=f"Most {mode.title()} wins last season", inline=False)
         if p["is_captain"]:
             embed.set_footer(text="🎖️ Whitelisted captain")
         await interaction.response.send_message(embed=embed)

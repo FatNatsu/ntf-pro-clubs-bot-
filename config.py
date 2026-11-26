@@ -194,3 +194,10 @@ EMBED_TITLE_PREFIX = "NTF"  # used to prefix embed titles, e.g. "NTF Pro Clubs Q
 # A player on a win streak of at least this many games gets a flame next to
 # their name in the per-game result posts in session-history.
 HOT_STREAK_MIN = 3
+
+
+# Seasons run on a clock: this many days after a season starts, the bot
+# resets it by itself (see season.py / cogs/season_cog.py). A warning is
+# posted in the season archive this many hours before the end.
+SEASON_LENGTH_DAYS = 30
+SEASON_WARNING_HOURS = 24

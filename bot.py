@@ -28,6 +28,7 @@ EXTENSIONS = [
     "cogs.stats_cog",
     "cogs.queue_cog",
     "cogs.session_cog",
+    "cogs.season_cog",
 ]
 
 

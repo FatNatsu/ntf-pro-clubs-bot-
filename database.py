@@ -184,6 +184,11 @@ def init_db():
             conn.execute("ALTER TABLE guild_config ADD COLUMN season_started_at TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+        for column in ("season_number INTEGER", "season_warned INTEGER", "crown_rivals_id INTEGER", "crown_league_id INTEGER"):
+            try:
+                conn.execute(f"ALTER TABLE guild_config ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         try:
             conn.execute("ALTER TABLE sessions ADD COLUMN winning_team_id INTEGER")
         except sqlite3.OperationalError:
@@ -497,6 +502,20 @@ def get_mode_rank_position(guild_id: int, discord_id: int, mode: str):
             if r["discord_id"] == discord_id:
                 return i
         return None
+
+
+def most_wins(guild_id: int, mode: str):
+    """The Golden Crown: the real player with the most wins in this mode
+    right now (ties: fewer losses, then higher MMR). None if nobody has won
+    a game. Returns {discord_id, wins, losses, mmr}."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT discord_id, wins, losses, mmr FROM player_mode_stats "
+            "WHERE guild_id=? AND mode=? AND wins>0 AND discord_id>0 "
+            "ORDER BY wins DESC, losses ASC, mmr DESC LIMIT 1",
+            (guild_id, mode),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def reset_mode_leaderboard(guild_id: int, mode: str):

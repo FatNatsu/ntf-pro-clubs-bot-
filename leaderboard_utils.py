@@ -5,17 +5,22 @@ import mmr
 import ui
 
 
-def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard", start_rank=1, colour=None):
+def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard", start_rank=1, colour=None,
+                            crown_id=None, header=None):
+    """crown_id: last season's Golden Crown winner in this mode - gets a 👑
+    by their name. header: a line shown above the table (the season countdown)."""
     lines = []
     for i, p in enumerate(rows, start=start_rank):
         letter = mmr.rank_for_mmr(p["mmr"])
         marker = "➡️ " if highlight_id and p["discord_id"] == highlight_id else ""
+        crown = " 👑" if crown_id and p["discord_id"] == crown_id else ""
         lines.append(
-            f"{marker}`{i:>2}.` **{letter}** — <@{p['discord_id']}> — {p['mmr']} MMR ({p['wins']}W-{p['losses']}L)"
+            f"{marker}`{i:>2}.` **{letter}** — <@{p['discord_id']}>{crown} — {p['mmr']} MMR ({p['wins']}W-{p['losses']}L)"
         )
+    body = "\n".join(lines) if lines else "No players tracked yet — get a session going!"
     embed = discord.Embed(
         title=title,
-        description="\n".join(lines) if lines else "No players tracked yet — get a session going!",
+        description=f"{header}\n\n{body}" if header else body,
         color=colour if colour is not None else discord.Color.gold(),
     )
     return embed
@@ -26,8 +31,12 @@ async def _refresh_one_mode_leaderboard(guild: discord.Guild, channel: discord.T
     specific mode. Rivals and League each get their own message in the
     same #leaderboard channel, tracked independently."""
     rows = db.mode_leaderboard(guild.id, mode, 10)
-    embed = build_leaderboard_embed(rows, title=f"🏆 NTF {mode.title()} Leaderboard", colour=ui.accent(mode))
-    embed.set_footer(text=f"Run /leaderboard mode:{mode} anywhere to see your own rank highlighted, even outside the top 10.")
+    import season  # here, not at the top: season.py imports this module
+    embed = build_leaderboard_embed(
+        rows, title=f"🏆 NTF {mode.title()} Leaderboard", colour=ui.accent(mode),
+        crown_id=season.crown_holder(guild.id, mode), header=season.countdown_line(guild.id),
+    )
+    embed.set_footer(text=f"👑 = last season's Golden Crown (most wins) · /leaderboard mode:{mode} shows your own rank")
 
     message_id_key = f"leaderboard_message_id_{mode}"
     message = None

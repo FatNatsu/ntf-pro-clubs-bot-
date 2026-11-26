@@ -10,6 +10,7 @@ import mmr
 import mmr as mmr_module  # alias used specifically where a local variable/param would shadow the plain `mmr` name
 import voice_utils
 import leaderboard_utils
+import season
 import ui
 
 
@@ -32,69 +33,21 @@ class ConfirmSeasonResetView(discord.ui.View):
         # valid for several minutes afterward, not just ~3 seconds.
         await interaction.response.defer(ephemeral=True)
 
-        # a reset wipes session records, so it can't run under a live session
-        session_cog = self.bot.get_cog("SessionCog")
-        if session_cog and any(s["guild_id"] == self.guild_id for s in session_cog.active_sessions.values()):
+        result = await season.run_reset(self.bot, interaction.guild)
+        if result is None:
             await interaction.edit_original_response(
                 content="A session is still running. End it first, then run the season reset again. Nothing was changed.",
                 view=None,
             )
             return
-
-        # Snapshot BOTH ladders' top 5 to the season-archive channel BEFORE
-        # anything gets wiped, since both are about to be reset together.
-        cfg = db.get_guild_config(self.guild_id)
-        archive_channel_id = cfg.get("season_archive_channel_id") if cfg else None
-        archive_channel = interaction.guild.get_channel(archive_channel_id) if archive_channel_id else None
-        if archive_channel:
-            embed = discord.Embed(
-                title="🏅 Season Ended — Rivals & League Reset",
-                color=ui.accent("neutral"),
-            )
-            for snap_mode, emoji in (("rivals", "⚔️"), ("league", "🏆")):
-                top5 = db.mode_leaderboard(self.guild_id, snap_mode, limit=5)
-                if top5:
-                    lines = [
-                        f"`{i}.` **{mmr.rank_for_mmr(p['mmr'])}** — <@{p['discord_id']}> — {p['mmr']} MMR ({p['wins']}W-{p['losses']}L)"
-                        for i, p in enumerate(top5, start=1)
-                    ]
-                else:
-                    lines = ["*no players tracked yet*"]
-                embed.add_field(name=f"{emoji} {snap_mode.title()} Top 5", value="\n".join(lines), inline=False)
-            try:
-                await archive_channel.send(**ui.send_kwargs("season_archive", embed))
-            except discord.HTTPException:
-                pass
-
-        clubs_reset_total = 0
-        for mode in ("rivals", "league"):
-            db.reset_mode_leaderboard(self.guild_id, mode)
-            clubs_reset_total += db.reset_club_records(self.guild_id, mode)
-        db.set_season_boundary(self.guild_id)
-        sessions_removed = db.reset_sessions(self.guild_id)
-
-        # session-history starts empty for the new season too; the
-        # season-archive channel (the season winners) is never touched.
-        # In the background - clearing a long channel can take a while.
-        history_id = cfg.get("history_channel_id") if cfg else None
-        history_channel = interaction.guild.get_channel(history_id) if history_id else None
-        if history_channel:
-            bot_id = self.bot.user.id
-
-            async def _clear_history():
-                try:
-                    await history_channel.purge(limit=None, check=lambda m: m.author.id == bot_id)
-                except discord.HTTPException:
-                    pass
-
-            asyncio.create_task(_clear_history())
-
-        await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
+        crowns = ", ".join(
+            f"{mode.title()}: <@{winner['discord_id']}>" for mode, winner in result["crowns"].items() if winner
+        ) or "nobody (no games were won)"
         await interaction.edit_original_response(
-            content=f"✅ **Season reset** — every player's MMR (both Rivals and League) is back to "
-                    f"{config.STARTING_MMR} with a clean record, {clubs_reset_total} club result(s) across "
-                    f"both modes were cleared, and {sessions_removed} past session(s) were removed so the new "
-                    f"season starts fresh. The season winners in the season archive were kept.",
+            content=f"✅ **Season {result['ended']} reset** — every player's MMR (both Rivals and League) is back to "
+                    f"{config.STARTING_MMR} with a clean record, {result['clubs_reset']} club result(s) were cleared "
+                    f"and {result['sessions_removed']} past session(s) were removed. 👑 Golden Crown: {crowns}. "
+                    f"Season {result['ended'] + 1} has started and ends in {config.SEASON_LENGTH_DAYS} days.",
             view=None,
         )
 

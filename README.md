@@ -256,3 +256,19 @@ process without interfering with each other.
   it's a genuine mini-league, not a random bracket.
 - The 5-minute League auto-close timer starts on the *first* person readying
   up for League, not from when the panel was posted.
+
+## Seasons, the countdown and the Golden Crown
+
+- A season lasts `SEASON_LENGTH_DAYS` (30) days from its start. The clock
+  starts by itself the first time the bot sees a server that has run
+  `/ntf_setup`.
+- Both leaderboards show the season number and when it ends. The date counts
+  down by itself (Discord date stamps), in each member's own time zone.
+- `SEASON_WARNING_HOURS` (24) before the end, a warning is posted in the
+  season archive.
+- When the countdown runs out the bot resets the season by itself. If a
+  session is live it waits and tries again every 10 minutes.
+  `/season_reset` still works and ends the season early.
+- **Golden Crown:** at each reset, the player with the most wins in each
+  mode (ties: fewer losses, then higher MMR) is named in the season archive
+  and carries a 👑 on the leaderboard and in `/rank` for the next season.
