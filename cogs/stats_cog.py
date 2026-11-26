@@ -77,6 +77,7 @@ class StatsCog(commands.Cog):
 
         best_teammate = db.get_player_best_teammate(guild_id, member.id)
         rival = db.get_player_rival(guild_id, member.id)
+        worst_mate = db.get_player_most_losses_with(guild_id, member.id)
         highlights = [
             f"🛡️ **Best club:** {best_club['club_name']} ({best_club['wins']} wins)" if best_club
             else "🛡️ **Best club:** *no wins yet*",
@@ -84,6 +85,8 @@ class StatsCog(commands.Cog):
             if best_teammate else "🤝 **Best teammate:** *no wins together yet*",
             f"👥 **Most played with:** <@{best_mate['teammate_id']}> ({best_mate['games']} games)" if best_mate
             else "👥 **Most played with:** *not enough games yet*",
+            f"💀 **Most losses with:** <@{worst_mate['teammate_id']}> ({worst_mate['losses']} losses in {worst_mate['games']} games together)"
+            if worst_mate else "💀 **Most losses with:** *no losses together yet*",
             f"😈 **Rival:** <@{rival['opponent_id']}> (lost to them {rival['losses']} times in {rival['games']} games)" if rival
             else "😈 **Rival:** *no losses yet*",
         ]
