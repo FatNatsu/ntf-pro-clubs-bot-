@@ -104,7 +104,11 @@ can post this panel; any player can then ready up from it.
    **`━━━ ROUND N ━━━`** divider, then that fixture's panel: **▶️ Match
    Live** at kick-off, then two big red buttons to report the winner.
    Tapping a side pops up a scoreline prompt, then locks the result in —
-   winner turns 👑 green, both buttons disable. Underneath sits the
+   winner turns 👑 green, both buttons disable. If players lag out and the
+   game has to be restarted, either captain (or an admin) presses
+   **⏸️ Pause Match**: the match shows as paused everywhere and the rosters
+   unlock, so a sub brought on during the pause counts. **Resume Match**
+   puts it live again and re-locks the rosters. Underneath sits the
    **captain panel** for roster changes, and a copy of the live Sub Queue.
 8. Each game's **public match channel** shows both teams, their captains
    and players, whether the game is waiting, live or finished, and

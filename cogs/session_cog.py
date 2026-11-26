@@ -138,16 +138,21 @@ class MatchControlView(discord.ui.View):
         self.btn_b = discord.ui.Button(label=f"{team_b_club} Win", style=discord.ButtonStyle.danger, emoji="🔴", row=0)
         self.btn_pens = discord.ui.Button(label="Went to Penalties", style=discord.ButtonStyle.secondary, emoji="⚽", row=1)
         self.btn_live = discord.ui.Button(label="Match Live", style=discord.ButtonStyle.success, emoji="▶️", row=1)
+        # Only usable while the match is live - for when players lag out and
+        # the game has to be restarted (see _make_pause_callback).
+        self.btn_pause = discord.ui.Button(label="Pause Match", style=discord.ButtonStyle.secondary, emoji="⏸️", row=1, disabled=True)
         self.btn_undo = discord.ui.Button(label="Undo Result (Admin)", style=discord.ButtonStyle.secondary, emoji="↩️", row=2)
         self.btn_a.callback = self._make_callback(team_a_id, team_a_club, team_b_id, team_b_club)
         self.btn_b.callback = self._make_callback(team_b_id, team_b_club, team_a_id, team_a_club)
         self.btn_pens.callback = self._make_pens_callback()
         self.btn_live.callback = self._make_live_callback()
+        self.btn_pause.callback = self._make_pause_callback()
         self.btn_undo.callback = self._make_undo_callback()
         self.add_item(self.btn_a)
         self.add_item(self.btn_b)
         self.add_item(self.btn_pens)
         self.add_item(self.btn_live)
+        self.add_item(self.btn_pause)
         self.add_item(self.btn_undo)
 
     def _make_undo_callback(self):
@@ -169,6 +174,12 @@ class MatchControlView(discord.ui.View):
             self.btn_a.emoji = "🔴"
             self.btn_b.emoji = "🔴"
             self.btn_live.disabled = False
+            self.btn_live.label = "Match Live"
+            self.btn_pause.disabled = True
+            undo_state = self.cog.active_sessions.get(self.session_id)
+            if undo_state:
+                undo_state["match_rosters"].pop(self.match_id, None)
+                undo_state.setdefault("paused_matches", set()).discard(self.match_id)
             try:
                 await interaction.message.edit(view=self)
             except discord.HTTPException:
@@ -210,14 +221,55 @@ class MatchControlView(discord.ui.View):
                 "team_a": set(state["teams"][self.team_a_id]["on_field"]),
                 "team_b": set(state["teams"][self.team_b_id]["on_field"]),
             }
+            paused = state.setdefault("paused_matches", set())
+            resumed = self.match_id in paused
+            paused.discard(self.match_id)
             self.btn_live.disabled = True
             self.btn_live.label = "Rosters Locked"
+            self.btn_pause.disabled = False
             await interaction.response.edit_message(view=self)
             await self.cog._mark_progress_field_live(self.session_id, self.match_id)
             await self.cog._refresh_status(self.session_id)
             await self.cog._log_action(
                 self.session_id,
-                f"▶️ <@{interaction.user.id}> marked **{self.team_a_club}** vs **{self.team_b_club}** as LIVE.",
+                f"▶️ <@{interaction.user.id}> {'resumed' if resumed else 'marked'} **{self.team_a_club}** vs "
+                f"**{self.team_b_club}** {'— LIVE again' if resumed else 'as LIVE'}.",
+            )
+        return callback
+
+    def _make_pause_callback(self):
+        async def callback(interaction: discord.Interaction):
+            """Pause = the game has stopped and is going to be restarted
+            (someone lagged out, the lobby broke). It takes the match back
+            off LIVE and UNLOCKS the rosters, so a sub brought on during the
+            pause counts for the restarted game. Pressing Match Live again
+            (now labelled Resume Match) re-locks whoever is on each team at
+            that moment."""
+            if not self.cog.is_captain_or_admin(interaction, self.session_id, {self.team_a_id, self.team_b_id}):
+                await interaction.response.send_message(
+                    "Only a captain of one of these two teams (or a server admin) can pause this match.",
+                    ephemeral=True,
+                )
+                return
+            state = self.cog.active_sessions.get(self.session_id)
+            if not state:
+                await interaction.response.send_message("This session has ended.", ephemeral=True)
+                return
+            if self.match_id not in state["match_rosters"]:
+                await interaction.response.send_message("This match isn't live, so there's nothing to pause.", ephemeral=True)
+                return
+            del state["match_rosters"][self.match_id]
+            state.setdefault("paused_matches", set()).add(self.match_id)
+            self.btn_pause.disabled = True
+            self.btn_live.disabled = False
+            self.btn_live.label = "Resume Match"
+            await interaction.response.edit_message(view=self)
+            await self.cog._mark_progress_field_paused(self.session_id, self.match_id)
+            await self.cog._refresh_status(self.session_id)
+            await self.cog._log_action(
+                self.session_id,
+                f"⏸️ <@{interaction.user.id}> paused **{self.team_a_club}** vs **{self.team_b_club}** "
+                f"— rosters unlocked until it's resumed.",
             )
         return callback
 
@@ -1401,6 +1453,8 @@ class SessionCog(commands.Cog):
             return f"✅ Finished {score} — **{winner}** won"
         if match["id"] in state["match_rosters"]:
             return "🔴 **LIVE**"
+        if match["id"] in state.get("paused_matches", ()):
+            return "⏸️ **Paused** — restarting"
         return "⏳ Waiting to start"
 
     def _build_match_embed(self, session_id, slot, match=None):
@@ -1857,6 +1911,21 @@ class SessionCog(commands.Cog):
         except (discord.HTTPException, IndexError):
             pass
 
+    async def _mark_progress_field_paused(self, session_id, match_id):
+        """Shows a paused fixture as paused on its #in-progress card."""
+        state = self.active_sessions.get(session_id)
+        pr = state["progress_round_message"] if state else None
+        if not pr or match_id not in pr["embed_index"]:
+            return
+        message = pr["message"]
+        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
+        try:
+            embeds = list(message.embeds)
+            embeds[idx].description = "⏸️ **Paused** — restarting"
+            await message.edit(embeds=embeds)
+        except (discord.HTTPException, IndexError):
+            pass
+
     async def _update_progress_field_reset(self, session_id, match_id, club_a, club_b):
         """Resets a fixture's card in #in-progress back to the plain
         "In progress" placeholder - used after an admin undoes a result, so
@@ -1955,6 +2024,8 @@ class SessionCog(commands.Cog):
         origin_view.btn_a.disabled = True
         origin_view.btn_b.disabled = True
         origin_view.btn_live.disabled = True
+        origin_view.btn_pause.disabled = True
+        state.setdefault("paused_matches", set()).discard(match_id)
         if winner_team_id == origin_view.team_a_id:
             origin_view.btn_a.style = discord.ButtonStyle.success
             origin_view.btn_a.emoji = "👑"
