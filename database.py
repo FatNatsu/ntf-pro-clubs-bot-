@@ -184,6 +184,14 @@ def init_db():
             conn.execute("ALTER TABLE guild_config ADD COLUMN season_started_at TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # hidden_mmr: a second rating per mode that seasons never reset - used
+        # only to build fair teams (NULL = same as mmr, nothing recorded yet).
+        # last_season_mmr: where the player's visible MMR finished last season.
+        for column in ("hidden_mmr INTEGER", "last_season_mmr INTEGER"):
+            try:
+                conn.execute(f"ALTER TABLE player_mode_stats ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         for column in ("season_number INTEGER", "season_warned INTEGER", "crown_rivals_id INTEGER", "crown_league_id INTEGER"):
             try:
                 conn.execute(f"ALTER TABLE guild_config ADD COLUMN {column}")
@@ -357,16 +365,50 @@ def update_mode_mmr(guild_id: int, discord_id: int, mode: str, new_mmr: int, won
     (new MMR + win/loss increment) for this specific mode only."""
     ensure_player_mode_stats(guild_id, discord_id, mode)
     with get_conn() as conn:
+        # the hidden rating moves by exactly what this result moved the
+        # visible one (every value on the right is read before the update)
+        hidden = "hidden_mmr=MAX(0, COALESCE(hidden_mmr, mmr) + (? - mmr))"
         if won:
             conn.execute(
-                "UPDATE player_mode_stats SET mmr=?, wins=wins+1 WHERE guild_id=? AND discord_id=? AND mode=?",
-                (new_mmr, guild_id, discord_id, mode),
+                f"UPDATE player_mode_stats SET {hidden}, mmr=?, wins=wins+1 WHERE guild_id=? AND discord_id=? AND mode=?",
+                (new_mmr, new_mmr, guild_id, discord_id, mode),
             )
         else:
             conn.execute(
-                "UPDATE player_mode_stats SET mmr=?, losses=losses+1 WHERE guild_id=? AND discord_id=? AND mode=?",
-                (new_mmr, guild_id, discord_id, mode),
+                f"UPDATE player_mode_stats SET {hidden}, mmr=?, losses=losses+1 WHERE guild_id=? AND discord_id=? AND mode=?",
+                (new_mmr, new_mmr, guild_id, discord_id, mode),
             )
+
+
+def balance_rating(guild_id: int, discord_id: int, mode: str) -> int:
+    """The rating teams and sub picks are balanced on: the hidden MMR, which
+    carries over between seasons. Same as the visible MMR until a result or
+    a season reset has given the player a hidden one."""
+    stats = get_player_mode_stats(guild_id, discord_id, mode)
+    return stats["hidden_mmr"] if stats.get("hidden_mmr") is not None else stats["mmr"]
+
+
+def set_hidden_mmr(guild_id: int, discord_id: int, mode: str, value: int):
+    """Admin: set a player's hidden MMR directly (for example from an old
+    season's leaderboard). Their visible MMR and record are not touched."""
+    ensure_player_mode_stats(guild_id, discord_id, mode)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE player_mode_stats SET hidden_mmr=? WHERE guild_id=? AND discord_id=? AND mode=?",
+            (max(0, value), guild_id, discord_id, mode),
+        )
+
+
+def hidden_leaderboard(guild_id: int, mode: str, limit: int = 25):
+    """Real players ordered by hidden MMR, for the admin-only view."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT discord_id, mmr, COALESCE(hidden_mmr, mmr) AS hidden_mmr, last_season_mmr "
+            "FROM player_mode_stats WHERE guild_id=? AND mode=? AND discord_id>0 "
+            "ORDER BY COALESCE(hidden_mmr, mmr) DESC LIMIT ?",
+            (guild_id, mode, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def set_mode_mmr(guild_id: int, discord_id: int, mode: str, new_mmr: int):
@@ -523,7 +565,10 @@ def reset_mode_leaderboard(guild_id: int, mode: str):
     untouched. Run once per mode if you want both reset."""
     with get_conn() as conn:
         conn.execute(
-            "UPDATE player_mode_stats SET mmr=?, wins=0, losses=0 WHERE guild_id=? AND mode=?",
+            # the visible rating starts again; the hidden one carries over,
+            # and where the season finished is kept for the admin view
+            "UPDATE player_mode_stats SET last_season_mmr=mmr, hidden_mmr=COALESCE(hidden_mmr, mmr), "
+            "mmr=?, wins=0, losses=0 WHERE guild_id=? AND mode=?",
             (config.STARTING_MMR, guild_id, mode),
         )
 
@@ -916,15 +961,17 @@ def undo_match_result(match_id):
             if mode:
                 if p["result"] == "win":
                     conn.execute(
-                        "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?), wins=MAX(0, wins-1) "
+                        "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?), wins=MAX(0, wins-1), "
+                        "hidden_mmr=CASE WHEN hidden_mmr IS NULL THEN NULL ELSE MAX(0, hidden_mmr-?) END "
                         "WHERE guild_id=? AND discord_id=? AND mode=?",
-                        (p["mmr_delta"], p["guild_id"], p["player_id"], mode),
+                        (p["mmr_delta"], p["mmr_delta"], p["guild_id"], p["player_id"], mode),
                     )
                 else:
                     conn.execute(
-                        "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?), losses=MAX(0, losses-1) "
+                        "UPDATE player_mode_stats SET mmr=MAX(0, mmr-?), losses=MAX(0, losses-1), "
+                        "hidden_mmr=CASE WHEN hidden_mmr IS NULL THEN NULL ELSE MAX(0, hidden_mmr-?) END "
                         "WHERE guild_id=? AND discord_id=? AND mode=?",
-                        (p["mmr_delta"], p["guild_id"], p["player_id"], mode),
+                        (p["mmr_delta"], p["mmr_delta"], p["guild_id"], p["player_id"], mode),
                     )
             affected.append(p["player_id"])
 

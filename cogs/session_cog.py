@@ -965,7 +965,7 @@ class SessionCog(commands.Cog):
                 return m, pool, True
 
         guild_id, mode = state["guild_id"], state["mode"]
-        mmr_of = lambda uid: db.get_player_mode_stats(guild_id, uid, mode)["mmr"]
+        mmr_of = lambda uid: db.balance_rating(guild_id, uid, mode)  # hidden rating, same as the draft
         active_ids = set()
         for t in state["teams"].values():
             active_ids |= t["on_field"]
@@ -1180,7 +1180,11 @@ class SessionCog(commands.Cog):
         # session (3+ times triggers a swap to another team, when one's
         # available).
         teammate_counts = db.get_teammate_pair_counts(guild.id, [p["discord_id"] for p in players])
-        built = team_balance.build_teams(players, num_teams, initial_team_size=initial_team_size, teammate_counts=teammate_counts)
+        # Teams are balanced on the hidden rating (it carries over between
+        # seasons, so a fresh season where everyone shows the starting MMR
+        # still gets even teams). Copies - the visible numbers stay untouched.
+        draft_pool = [{**p, "mmr": db.balance_rating(guild.id, p["discord_id"], mode)} for p in players]
+        built = team_balance.build_teams(draft_pool, num_teams, initial_team_size=initial_team_size, teammate_counts=teammate_counts)
         club_names = team_balance.pick_random_club_names(db.list_clubs(guild.id), num_teams)
         captain_ids = [t["captain"]["discord_id"] for t in built]
 
