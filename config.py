@@ -189,3 +189,8 @@ DB_PATH = os.environ.get("PRO_CLUBS_DB_PATH", "pro_clubs.db")
 # ---------------------------------------------------------------------------
 BOT_NAME = "NTF"
 EMBED_TITLE_PREFIX = "NTF"  # used to prefix embed titles, e.g. "NTF Pro Clubs Queue"
+
+
+# A player on a win streak of at least this many games gets a flame next to
+# their name in the per-game result posts in session-history.
+HOT_STREAK_MIN = 3

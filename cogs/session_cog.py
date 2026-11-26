@@ -180,6 +180,9 @@ class MatchControlView(discord.ui.View):
             undo_state = self.cog.active_sessions.get(self.session_id)
             if undo_state:
                 undo_state["match_rosters"].pop(self.match_id, None)
+                undo_state.setdefault("match_live_at", {}).pop(self.match_id, None)
+                # the result post in session-history is no longer true - take it down
+                await self.cog._delete_quietly(undo_state.setdefault("result_posts", {}).pop(self.match_id, None))
                 undo_state.setdefault("paused_matches", set()).discard(self.match_id)
             try:
                 await interaction.message.edit(view=self)
@@ -221,6 +224,7 @@ class MatchControlView(discord.ui.View):
                 "team_a": set(state["teams"][self.team_a_id]["on_field"]),
                 "team_b": set(state["teams"][self.team_b_id]["on_field"]),
             }
+            state.setdefault("match_live_at", {}).setdefault(self.match_id, time.time())
             paused = state.setdefault("paused_matches", set())
             resumed = self.match_id in paused
             paused.discard(self.match_id)
@@ -1975,6 +1979,12 @@ class SessionCog(commands.Cog):
 
         winner_club = state["teams"][winner_team_id]["club_name"]
 
+        if not state["is_test"]:
+            await self._post_match_result(
+                interaction.guild, session_id, match, state, a_won, score_a, score_b, went_to_pens,
+                team_a_players, team_b_players, mmr_updates, mmr_deltas,
+            )
+
         # flip the control-room buttons: winner green + disabled, loser grey + disabled
         origin_view.btn_a.disabled = True
         origin_view.btn_b.disabled = True
@@ -2008,6 +2018,54 @@ class SessionCog(commands.Cog):
         )
 
         await self._maybe_advance_round(guild, session_id)
+
+    async def _post_match_result(self, guild, session_id, match, state, a_won, score_a, score_b, went_to_pens,
+                                 team_a_players, team_b_players, mmr_updates, mmr_deltas):
+        """One post per finished game in session-history: both line-ups with
+        every player's new MMR and what this game changed it by, a flame for
+        anyone on a win streak, and how long the game took. Best-effort - a
+        failed post never blocks the result itself. Removed again if an admin
+        undoes the result."""
+        cfg = db.get_guild_config(state["guild_id"]) or {}
+        channel = guild.get_channel(cfg["history_channel_id"]) if cfg.get("history_channel_id") else None
+        if not channel:
+            return
+        mode = state["mode"]
+
+        def side(team_id, players):
+            lines = []
+            for p in sorted(players, key=lambda p: -mmr_updates.get(p["discord_id"], p["mmr"])):
+                pid = p["discord_id"]
+                delta = mmr_deltas.get(pid, 0)
+                streak_type, streak = db.get_player_streak(state["guild_id"], pid, mode)
+                flame = " 🔥" if streak_type == "W" and streak >= config.HOT_STREAK_MIN else ""
+                lines.append(f"{_captain_display(pid)} {mmr_updates.get(pid, p['mmr'])} ({delta:+d}){flame}")
+            return "\n".join(lines)[:1024] or "—"
+
+        club_a = state["teams"][match["team_a_id"]]["club_name"]
+        club_b = state["teams"][match["team_b_id"]]["club_name"]
+        winner, loser = (club_a, club_b) if a_won else (club_b, club_a)
+        score = "on penalties" if went_to_pens else f"{max(score_a, score_b)}–{min(score_a, score_b)}"
+        details = [f"Session #{session_id}", f"Round {match['round_no']}", "League" if mode == "league" else "Rivals"]
+        live_at = state.get("match_live_at", {}).get(match["id"])
+        if live_at:
+            details.append(f"⏱️ {max(1, round((time.time() - live_at) / 60))} min")
+        embed = discord.Embed(
+            title=f"👑 {winner} beat {loser} {score}"[:256],
+            description=" · ".join(details),
+            color=ui.accent(mode),
+        )
+        sides = [(match["team_a_id"], club_a, team_a_players, a_won), (match["team_b_id"], club_b, team_b_players, not a_won)]
+        sides.sort(key=lambda s: not s[3])  # winners first
+        for team_id, club, players, won in sides:
+            embed.add_field(name=f"{'🏆 Win' if won else '💀 Loss'} · {club}"[:256], value=side(team_id, players), inline=False)
+        embed.set_footer(text=f"🔥 = on a win streak of {config.HOT_STREAK_MIN} or more")
+
+        try:
+            message = await channel.send(embed=embed)
+        except discord.HTTPException:
+            return
+        state.setdefault("result_posts", {})[match["id"]] = message
 
     async def _maybe_advance_round(self, guild, session_id):
         state = self.active_sessions[session_id]
