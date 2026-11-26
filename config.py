@@ -20,44 +20,59 @@ GUILD_IDS = [int(g.strip()) for g in _raw_guild_ids.split(",") if g.strip()]
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
-# "rivals" = 2 teams, "league" = 4 teams
-MODE_TEAMS = {
-    "rivals": 2,
-    "league": 4,
+# League and Rivals are SEPARATE modes with their own sizes - never assume a
+# number from one applies to the other. Everything below is per mode:
+#
+#   teams       how many teams the mode has
+#   starting    players seated per team when a FULL queue pops
+#               (queue pop size = starting x teams)
+#   normal      the size a team normally fills to. The Add sub button and the
+#               sub turn order only ever top a team up to this number.
+#   cap         hard ceiling per team, subs included. When cap is above
+#               normal, the seats in between are a last resort: they are only
+#               filled when the team's captain (or an admin) explicitly asks,
+#               with the "Request Nth player" button.
+#   force_start how many readied-up players an admin needs to force start
+#               early (3 per team). Whatever number is actually ready is split
+#               evenly, with any remainder starting on the Bench.
+#
+# League: 4 teams, pops at 24 (6 a side), teams sit at 6, a 7th on request.
+# Rivals: 2 teams, pops at 22 (11 a side), subs can be added up to 11.
+MODE_RULES = {
+    "league": {"teams": 4, "starting": 6, "normal": 6, "cap": 7, "force_start": 12},
+    "rivals": {"teams": 2, "starting": 11, "normal": 11, "cap": 11, "force_start": 6},
 }
 
-# How many players get seated on each team when a full queue pops. Teams then
-# grow from the Bench (via Add sub / Transfer) up to NORMAL_TEAM_SIZE below,
-# or to TEAM_SIZE if a 7th player is explicitly requested.
-STARTING_TEAM_SIZE = 6
 
-# The size a team normally fills to. The Add sub button (and the sub turn
-# order) only ever tops a team up to THIS number - a team at 6 is treated as
-# complete and drops out of the turn order.
-NORMAL_TEAM_SIZE = 6
+def starting_team_size(mode: str) -> int:
+    return MODE_RULES[mode]["starting"]
 
-# Hard ceiling for any team, subs included. Also the size of every team voice
-# channel. The seat above NORMAL_TEAM_SIZE (the 7th player) is a last resort:
-# it is never filled by the normal Add sub button, only when that team's
-# captain (or an admin) explicitly asks for it with "Request 7th player".
-# A team at this size can't take another player until someone is removed
-# from its roster or transferred out.
-TEAM_SIZE = 7
+
+def normal_team_size(mode: str) -> int:
+    return MODE_RULES[mode]["normal"]
+
+
+def team_cap(mode: str) -> int:
+    return MODE_RULES[mode]["cap"]
+
+
+MODE_TEAMS = {mode: rules["teams"] for mode, rules in MODE_RULES.items()}
+
+# Pop thresholds: League 24, Rivals 22.
+QUEUE_CAP = {mode: rules["starting"] * rules["teams"] for mode, rules in MODE_RULES.items()}
+
+# Only used as team_balance.build_teams' fallback when a caller doesn't say
+# how many to seat (every real caller does).
+STARTING_TEAM_SIZE = MODE_RULES["league"]["starting"]
+
+# Shown after the club name on a team's voice channel once the team is at
+# its cap, e.g. "Fram Esports - MAX Players". Removed again when a seat opens.
+TEAM_FULL_SUFFIX = "MAX Players"
 
 # The Bench voice channel has no player cap at all - it's created with no user
 # limit. This constant is no longer enforced anywhere; it's only left defined
 # so any older code that still references it doesn't crash.
 BENCH_SIZE = 4
-
-QUEUE_CAP = {
-    # Pop thresholds: 12 for rivals, 24 for league - a full STARTING line-up
-    # for every team. Force-started sessions seat fewer, and those seats (up
-    # to NORMAL_TEAM_SIZE, or TEAM_SIZE on request) get filled afterwards
-    # from the Bench, which starts EMPTY and fills as extra players join it
-    # (see session_cog.py).
-    "rivals": STARTING_TEAM_SIZE * MODE_TEAMS["rivals"],   # 12
-    "league": STARTING_TEAM_SIZE * MODE_TEAMS["league"],   # 24
-}
 
 # The live "Sub Queue" message in session-control is refreshed this many seconds
 # after the Bench changes, batching a burst of people joining/leaving into a
@@ -82,14 +97,8 @@ SUB_MAX_SKIPS = 2
 READY_COUNTDOWN_SECONDS = 15
 
 # Admins can force-start a mode early once this many players are readied
-# up, so the bot can still field full teams even if the queue never fully
-# fills. Both modes need 3 per team: League 12 (4 teams of 3), Rivals 6
-# (2 teams of 3). Whatever number is actually readied up gets split evenly
-# (16 in League seats 4 per team), with any remainder starting on the Bench.
-FORCE_START_MIN = {
-    "league": 12,
-    "rivals": 6,
-}
+# up (see MODE_RULES above): League 12, Rivals 6.
+FORCE_START_MIN = {mode: rules["force_start"] for mode, rules in MODE_RULES.items()}
 
 # ---------------------------------------------------------------------------
 # MMR / Ranks (Elo-style)

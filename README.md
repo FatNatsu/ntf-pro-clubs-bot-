@@ -56,7 +56,8 @@ can post this panel; any player can then ready up from it.
    a dedicated **ready-check message** for that mode with a live list, so
    from then on players can ready up directly from that message too instead
    of going back to the main panel.
-2. **Rivals** needs 12 ready, **League** needs 24. Once a mode hits its
+2. **League** needs 24 ready (4 teams of 6), **Rivals** needs 22 (2 teams
+   of 11). The two modes have separate sizes throughout. Once a mode hits its
    number, a **30-second countdown** starts (last chance to back out) before
    the bot locks it in.
 3. **Force start**: if a queue stalls, an admin can hit **⚡ Force Start**
@@ -72,8 +73,8 @@ can post this panel; any player can then ready up from it.
    mode:<rivals|league>`** — a quick, low-friction way to keep the channel
    tidy.
 5. At pop time, the bot creates a category `NTF SESSION #<id> (MODE)`
-   containing: one locked-to-6 voice channel per team (named after a
-   randomly assigned club), 🪑 **Bench**, and 🎛️ **session-control**
+   containing: one voice channel per team, named after a randomly assigned
+   club and limited to the mode's team cap (7 in League, 11 in Rivals), 🪑 **Bench**, and 🎛️ **session-control**
    (visible only to that session's captains). If it was a force start with
    fewer than the full number of players, the missing head-count is added
    on top of Bench's normal capacity — e.g. a 16-player League force start
@@ -100,10 +101,19 @@ can post this panel; any player can then ready up from it.
 9. A team's captain (or an admin) can hit **🔁 Add sub** in
    session-control — it pulls a player from Bench straight onto the team
    (longest-waiting players first, best MMR fit among them; no swap, no
-   picking who comes off). Add sub only fills a team up to **6**. A team at
-   6 can take one more, to a hard maximum of **7**, only if its captain (or
-   an admin) presses **➕ Request 7th player** — and only once no other team
-   is still under 6.
+   picking who comes off).
+   - **League:** Add sub only fills a team up to **6**. A team at 6 can take
+     one more, to a hard maximum of **7**, only if its captain (or an admin)
+     presses **➕ Request 7th player** — and only once no other team is
+     still under 6.
+   - **Rivals:** Add sub fills a team all the way to its cap of **11**.
+   - When a team reaches its cap, its voice channel is renamed
+     "<club> - MAX Players"; the name goes back when a seat opens. Discord
+     only lets a channel be renamed about twice every ten minutes, so the
+     name can lag behind.
+   - A team channel's user limit is the cap **plus** one for every spectator
+     watching it and every admin sitting in it who isn't on the team (11
+     becomes 13 with two extra), and drops back when they leave.
 10. **MMR updates the moment each result is reported** — Elo-style, with the
     swing (K-factor) shrinking the higher a player's own rating is: full
     strength normally, smaller once they're A rank, smallest at S rank —
@@ -176,8 +186,8 @@ process without interfering with each other.
   (MMR, match/club history) is safe in the database regardless.
 - Force-start team size is `players_ready // num_teams`, so a 16-player
   League force start seats 4 per team and a 12-player one seats 3; the
-  voice channels are still created at the 7-player hard cap so subs can
-  fill the rest later.
+  voice channels are still created at the mode's full cap so subs can fill
+  the rest later.
 - Round matchups use a standard round-robin **circle method** for League, so
   it's a genuine mini-league, not a random bracket.
 - The 5-minute League auto-close timer starts on the *first* person readying

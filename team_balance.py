@@ -70,7 +70,7 @@ def build_teams(queued_players: list, num_teams: int, initial_team_size: int = N
     initial_team_size: how many starters to seat per team right now (defaults
         to config.STARTING_TEAM_SIZE). Force-started sessions pass a smaller number
         (e.g. 4 for a 16-player league force start) - the team VOICE
-        CHANNELS are still created at the full config.TEAM_SIZE ceiling so
+        CHANNELS are still created at the mode's full team cap so
         later subs from the bench can fill the remaining seats.
     teammate_counts: optional {frozenset({discord_id_a, discord_id_b}): count}
         - how many times each pair has been teammates in a real recorded

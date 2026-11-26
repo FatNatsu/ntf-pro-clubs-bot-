@@ -15,10 +15,29 @@ import leaderboard_utils
 
 
 def _ordinal(n: int) -> str:
-    """7 -> '7th'. Used so messages follow config.TEAM_SIZE if it ever changes."""
+    """7 -> '7th'. Used so messages follow the mode's team cap if it ever changes."""
     if 10 <= n % 100 <= 20:
         return f"{n}th"
     return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
+def _cap(state) -> int:
+    """Hard ceiling per team for this session's mode (League 7, Rivals 11)."""
+    return config.team_cap(state["mode"])
+
+
+def _normal(state) -> int:
+    """The size Add sub fills a team to in this session's mode."""
+    return config.normal_team_size(state["mode"])
+
+
+def _team_channel_name(state, team_id) -> str:
+    """A team's voice channel is named after its club, with a marker added
+    while the team is at its cap."""
+    info = state["teams"][team_id]
+    if len(info["on_field"]) >= _cap(state):
+        return f"{info['club_name']} - {config.TEAM_FULL_SUFFIX}"[:100]
+    return info["club_name"]
 
 
 class ScoreModal(discord.ui.Modal):
@@ -432,10 +451,11 @@ class TransferPlayerSelectView(discord.ui.View):
 class SessionControlPanelView(discord.ui.View):
     """Persistent-for-the-session sub + end controls, in session-control."""
 
-    def __init__(self, cog: "SessionCog", session_id, teams):
+    def __init__(self, cog: "SessionCog", session_id, teams, mode):
         super().__init__(timeout=None)
         self.cog = cog
         self.session_id = session_id
+        self.mode = mode
 
         # ONE button for the common case - it always represents whichever team is
         # currently up (see sync_sub_buttons), rather than one button per team.
@@ -443,13 +463,16 @@ class SessionControlPanelView(discord.ui.View):
         self.sub_button.callback = self._make_sub_callback()
         self.add_item(self.sub_button)
 
-        # The 7th seat is a last resort and is never filled by the button
-        # above - a captain (or admin) has to ask for it explicitly here.
-        seventh_btn = discord.ui.Button(
-            label=f"Request {_ordinal(config.TEAM_SIZE)} player", style=discord.ButtonStyle.secondary, emoji="➕"
-        )
-        seventh_btn.callback = self._seventh_callback
-        self.add_item(seventh_btn)
+        # Modes whose cap is above their normal size (League: 6, then a 7th)
+        # get a separate button for that last-resort seat - it is never filled
+        # by the button above, a captain (or admin) has to ask for it here.
+        # Rivals fills straight to its cap with Add sub, so it has no such button.
+        if config.team_cap(mode) > config.normal_team_size(mode):
+            seventh_btn = discord.ui.Button(
+                label=f"Request {_ordinal(config.team_cap(mode))} player", style=discord.ButtonStyle.secondary, emoji="➕"
+            )
+            seventh_btn.callback = self._seventh_callback
+            self.add_item(seventh_btn)
 
         # Admins keep a way to pull for a DIFFERENT team than whoever's turn it
         # is (an away captain, etc.) - the single button above always acts on
@@ -501,8 +524,8 @@ class SessionControlPanelView(discord.ui.View):
             team_id = self.cog._sub_turn_team(state)
             if team_id is None:
                 await interaction.response.send_message(
-                    f"No team can take a sub right now (all at {config.NORMAL_TEAM_SIZE}, or no captain). "
-                    f"A captain can still use Request {_ordinal(config.TEAM_SIZE)} player.",
+                    f"No team can take a sub right now (all at {_normal(state)}, or no captain)."
+                    + (f" A captain can still use Request {_ordinal(_cap(state))} player." if _cap(state) > _normal(state) else ""),
                     ephemeral=True
                 )
                 return
@@ -526,24 +549,24 @@ class SessionControlPanelView(discord.ui.View):
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message(
-                f"Only a team's captain (or an admin) can request a {_ordinal(config.TEAM_SIZE)} player.",
+                f"Only a team's captain (or an admin) can request a {_ordinal(_cap(state))} player.",
                 ephemeral=True,
             )
             return
         options = [
             discord.SelectOption(label=info["club_name"], value=str(team_id))
             for team_id, info in state["teams"].items()
-            if config.NORMAL_TEAM_SIZE <= len(info["on_field"]) < config.TEAM_SIZE
+            if _normal(state) <= len(info["on_field"]) < _cap(state)
         ]
         if not options:
             await interaction.response.send_message(
-                f"No team is sitting at {config.NORMAL_TEAM_SIZE} right now, so nobody can take a "
-                f"{_ordinal(config.TEAM_SIZE)} player.",
+                f"No team is sitting at {_normal(state)} right now, so nobody can take a "
+                f"{_ordinal(_cap(state))} player.",
                 ephemeral=True,
             )
             return
         view = discord.ui.View(timeout=60)
-        select = discord.ui.Select(placeholder=f"{_ordinal(config.TEAM_SIZE)} player for which team?", options=options)
+        select = discord.ui.Select(placeholder=f"{_ordinal(_cap(state))} player for which team?", options=options)
 
         async def on_select(select_interaction: discord.Interaction):
             team_id = int(select.values[0])
@@ -569,12 +592,12 @@ class SessionControlPanelView(discord.ui.View):
             return
         options = [
             discord.SelectOption(label=info["club_name"], value=str(team_id))
-            for team_id, info in state["teams"].items() if len(info["on_field"]) < config.NORMAL_TEAM_SIZE
+            for team_id, info in state["teams"].items() if len(info["on_field"]) < _normal(state)
         ]
         if not options:
             await interaction.response.send_message(
-                f"Every team already has {config.NORMAL_TEAM_SIZE} — use Request "
-                f"{_ordinal(config.TEAM_SIZE)} player if a team needs one more.",
+                f"Every team already has {_normal(state)}."
+                + (f" Use Request {_ordinal(_cap(state))} player if a team needs one more." if _cap(state) > _normal(state) else ""),
                 ephemeral=True,
             )
             return
@@ -719,7 +742,7 @@ class SpectateView(discord.ui.View):
                 # capacity (it never actually blocks the move - the bot's own
                 # Move Members bypasses the cap - but this keeps the number
                 # honest). The limit is always DERIVED from who's actually
-                # watching (TEAM_SIZE + current spectators on that channel)
+                # watching (the team cap + current spectators on that channel)
                 # rather than nudged up and down by one, so a double-click,
                 # a failed move, or hopping straight between Watch buttons
                 # can never make it drift past the cap.
@@ -791,18 +814,24 @@ class SessionCog(commands.Cog):
                     state["bench_since"].pop(member.id, None)
                     self._schedule_sub_queue_refresh(session_id)
 
+            team_channel_ids = {info["voice_channel_id"] for info in state["teams"].values()}
             async with state["spectate_lock"]:
                 watching_channel_id = state["spectators"].get(member.id)
-                if watching_channel_id is None:
-                    continue
                 after_channel_id = after.channel.id if after.channel else None
-                if after_channel_id != watching_channel_id:
+                if watching_channel_id is not None and after_channel_id != watching_channel_id:
                     await voice_utils.set_spectator_mute(member.guild, member.id, False)
                     del state["spectators"][member.id]
                     # Give back the seat the Watch button borrowed - recomputed
                     # from who's still watching, so it settles at exactly
-                    # TEAM_SIZE (+ any remaining spectators), never below.
+                    # the team cap (+ anyone still watching), never below.
                     await self._sync_spectator_capacity(member.guild, state, watching_channel_id)
+                # Anyone moving in or out of a team channel can change how
+                # many extra seats it needs (an admin dropping in or leaving),
+                # so settle both channels involved at their exact number.
+                if before_id != after_id:
+                    for channel_id in (before_id, after_id):
+                        if channel_id in team_channel_ids and channel_id != watching_channel_id:
+                            await self._sync_spectator_capacity(member.guild, state, channel_id)
 
     # ------------------------------------------------------ sub turn + queue
     def _sub_turn_order(self, state):
@@ -810,13 +839,13 @@ class SessionCog(commands.Cog):
         pull one: fewest players first, ties broken by a FIXED team order
         (the order the teams were created in) - so as teams fill up it
         cycles A -> B -> C -> D -> A rather than jumping around. Teams already
-        at config.NORMAL_TEAM_SIZE are left out (the seat above that is only
+        at the mode's normal size are left out (any seat above that is only
         ever filled on an explicit request, never by turn), as are teams
         with no captain (nobody there could press the button - an admin can
         still pull for them)."""
         order = []
         for idx, (team_id, info) in enumerate(state["teams"].items()):
-            if len(info["on_field"]) >= config.NORMAL_TEAM_SIZE:
+            if len(info["on_field"]) >= _normal(state):
                 continue
             if info["captain_id"] is None:
                 continue
@@ -933,19 +962,19 @@ class SessionCog(commands.Cog):
                 f"{teams[t]['club_name']} ({len(teams[t]['on_field'])})" for t in order
             ))
         else:
-            lines.append(f"No team can take a sub right now (all at {config.NORMAL_TEAM_SIZE}, or no captain).")
+            lines.append(f"No team can take a sub right now (all at {_normal(state)}, or no captain).")
         at_normal = [
             info["club_name"] for info in teams.values()
-            if config.NORMAL_TEAM_SIZE <= len(info["on_field"]) < config.TEAM_SIZE
+            if _normal(state) <= len(info["on_field"]) < _cap(state)
         ]
         if at_normal:
             lines.append(
-                f"✅ At {config.NORMAL_TEAM_SIZE}: {', '.join(at_normal)} — their captain can "
-                f"request a {_ordinal(config.TEAM_SIZE)} player if needed"
+                f"✅ At {_normal(state)}: {', '.join(at_normal)} — their captain can "
+                f"request a {_ordinal(_cap(state))} player if needed"
             )
-        full = [info["club_name"] for info in teams.values() if len(info["on_field"]) >= config.TEAM_SIZE]
+        full = [info["club_name"] for info in teams.values() if len(info["on_field"]) >= _cap(state)]
         if full:
-            lines.append(f"🔒 Full ({config.TEAM_SIZE}): {', '.join(full)}")
+            lines.append(f"🔒 Full ({_cap(state)}): {', '.join(full)}")
         lines.append("")
 
         waiting = self._bench_waiting(state, guild)
@@ -1017,9 +1046,10 @@ class SessionCog(commands.Cog):
 
     # ------------------------------------------------------------------ util
     async def _sync_spectator_capacity(self, guild, state, channel_id, extra=0):
-        """Sets a team channel's user limit to TEAM_SIZE plus however many
-        spectators are currently registered as watching it (plus `extra` for
-        one about to join). Derived from the spectator record every time, so
+        """Sets a team channel's user limit to the mode's team cap plus however
+        many spectators are currently registered as watching it and however
+        many non-team admins are sitting in it (plus `extra` for a spectator
+        about to join). It drops back to the plain cap when they leave. Derived from the spectator record every time, so
         it's idempotent and self-correcting - it can never drift upward the
         way repeated +1/-1 nudges could. Roster size plays no part here: the
         roster hard cap and Add sub buttons only ever look at on_field."""
@@ -1027,7 +1057,20 @@ class SessionCog(commands.Cog):
         if not channel:
             return
         watching = sum(1 for cid in state["spectators"].values() if cid == channel_id)
-        target = config.TEAM_SIZE + watching + extra
+        # Admins who drop into the channel without being on the team (and
+        # without using a Watch button) get a seat added for them too, so
+        # they never eat into the team's own places.
+        on_team = next(
+            (info["on_field"] for info in state["teams"].values() if info["voice_channel_id"] == channel_id), set()
+        )
+        admins = sum(
+            1 for m in channel.members
+            if not getattr(m, "bot", False)
+            and m.id not in on_team
+            and m.id not in state["spectators"]
+            and m.guild_permissions.manage_guild
+        )
+        target = _cap(state) + watching + admins + extra
         if channel.user_limit != target:
             try:
                 await channel.edit(user_limit=target)
@@ -1106,7 +1149,14 @@ class SessionCog(commands.Cog):
         # sum of every one of them in sequence. This is the single biggest
         # lever on how long a session takes to actually spin up.
         team_channel_tasks = [
-            voice_utils.create_team_voice_channel(guild, category, club_names[i], [m["discord_id"] for m in built_team["members"]], captain_ids)
+            voice_utils.create_team_voice_channel(
+                guild, category, club_names[i], [m["discord_id"] for m in built_team["members"]], captain_ids,
+                user_limit=config.team_cap(mode),
+                channel_name=(
+                    f"{club_names[i]} - {config.TEAM_FULL_SUFFIX}"[:100]
+                    if len(built_team["members"]) >= config.team_cap(mode) else None
+                ),
+            )
             for i, built_team in enumerate(built)
         ]
         bench_channel_task = voice_utils.create_bench_channel(guild, category, captain_ids)
@@ -1146,7 +1196,7 @@ class SessionCog(commands.Cog):
             team_id = db.create_team(session_id, club_name, captain_id=captain["discord_id"])
             db_team_ids.append(team_id)
 
-            # channel is always created at the full config.TEAM_SIZE cap, even
+            # channel is always created at the mode's full team cap, even
             # if we're only seating `initial_team_size` right now - that way
             # subs pulled in later from the bench have somewhere to go.
             db.set_team_voice_channel(team_id, channel.id)
@@ -1161,6 +1211,11 @@ class SessionCog(commands.Cog):
                 "captain_id": captain["discord_id"],
                 "voice_channel_id": channel.id,
                 "on_field": set(member_ids),
+                # the voice channel name the bot last set, so it only renames on a real change
+                "vc_name": (
+                    f"{club_name} - {config.TEAM_FULL_SUFFIX}"[:100]
+                    if len(member_ids) >= config.team_cap(mode) else club_name
+                ),
             }
             built_team["_team_id"] = team_id  # stash for the bench pass below
 
@@ -1244,7 +1299,7 @@ class SessionCog(commands.Cog):
         await self._post_team_overview(guild, session_id)
         await self._post_team_roster(guild, session_id)
         control_channel_obj = guild.get_channel(control_channel.id)
-        control_view = SessionControlPanelView(self, session_id, teams_state)
+        control_view = SessionControlPanelView(self, session_id, teams_state, mode)
         # a team that starts already at the roster ceiling begins greyed out, and the team
         # with the fewest players starts with the turn
         control_view.sync_sub_buttons(teams_state, self._sub_turn_team(self.active_sessions[session_id]))
@@ -1340,6 +1395,40 @@ class SessionCog(commands.Cog):
         except discord.HTTPException:
             pass
 
+    def _schedule_team_name_sync(self, guild, state, team_id):
+        """Keeps a team's voice channel name in step with whether the team is
+        at its cap ("<club> - MAX Players") or not ("<club>"). Runs in the
+        background and never blocks a sub or transfer: Discord only allows a
+        channel to be renamed a couple of times every ten minutes and makes
+        the bot wait when that's used up, so a rename can lag behind while
+        everything else carries on."""
+        info = state["teams"][team_id]
+        if info.get("vc_name") == _team_channel_name(state, team_id):
+            return
+        pending = state.setdefault("name_sync_pending", set())
+        if team_id in pending:
+            return  # one already running - it re-checks the roster when it finishes
+        pending.add(team_id)
+
+        async def _run():
+            try:
+                for _attempt in range(3):
+                    desired = _team_channel_name(state, team_id)
+                    if info.get("vc_name") == desired:
+                        return
+                    channel = guild.get_channel(info["voice_channel_id"])
+                    if not channel:
+                        return
+                    try:
+                        await channel.edit(name=desired)
+                    except discord.HTTPException:
+                        return
+                    info["vc_name"] = desired
+            finally:
+                pending.discard(team_id)
+
+        asyncio.create_task(_run())
+
     async def _refresh_team_roster(self, session_id):
         state = self.active_sessions.get(session_id)
         if not state:
@@ -1348,6 +1437,10 @@ class SessionCog(commands.Cog):
         # also keeps the Add sub buttons in step with team sizes.
         await self._refresh_sub_buttons(session_id)
         self._schedule_sub_queue_refresh(session_id)  # the "next sub goes to..." line depends on roster sizes too
+        guild = self.bot.get_guild(state["guild_id"])
+        if guild:
+            for team_id in state["teams"]:
+                self._schedule_team_name_sync(guild, state, team_id)
         message = state.get("roster_message")
         if not message:
             return
@@ -1749,22 +1842,24 @@ class SessionCog(commands.Cog):
     # -------------------------------------------------------------- subs
     def _sub_blocked_reason(self, state, team_id, club_name, extra, full_msg):
         """Why this team can't take a player through this path right now, or
-        None if it can. Normal subs stop at NORMAL_TEAM_SIZE; the extra
+        None if it can. Normal subs stop at the normal size; the extra
         (7th player) request only applies to a team sitting between
-        NORMAL_TEAM_SIZE and the TEAM_SIZE ceiling."""
+        the normal size and the team cap."""
         size = len(state["teams"][team_id]["on_field"])
-        if size >= config.TEAM_SIZE:
+        if size >= _cap(state):
             return full_msg
-        if extra and size < config.NORMAL_TEAM_SIZE:
+        if extra and size < _normal(state):
             return (
                 f"{club_name} only has {size} — use the green Add sub button until the team is at "
-                f"{config.NORMAL_TEAM_SIZE}. The {_ordinal(config.TEAM_SIZE)} player is a last resort after that."
+                f"{_normal(state)}. The {_ordinal(_cap(state))} player is a last resort after that."
             )
-        if not extra and size >= config.NORMAL_TEAM_SIZE:
+        if not extra and size >= _normal(state):
+            if _cap(state) <= _normal(state):
+                return full_msg
             return (
-                f"{club_name} already has {config.NORMAL_TEAM_SIZE} players. If you really need one more, "
-                f"the captain can press **Request {_ordinal(config.TEAM_SIZE)} player** "
-                f"(maximum {config.TEAM_SIZE} per team)."
+                f"{club_name} already has {_normal(state)} players. If you really need one more, "
+                f"the captain can press **Request {_ordinal(_cap(state))} player** "
+                f"(maximum {_cap(state)} per team)."
             )
         return None
 
@@ -1775,11 +1870,11 @@ class SessionCog(commands.Cog):
         waiting NA players first). It has to be that team's turn - the team
         with the fewest players goes first - unless an admin is the one
         clicking. No swapping: this adds to the roster, up to
-        config.NORMAL_TEAM_SIZE.
+        _normal(state).
 
         extra=True is the "Request 7th player" path: it fills the one seat
-        between NORMAL_TEAM_SIZE and the config.TEAM_SIZE ceiling. It only
-        works for a team already at NORMAL_TEAM_SIZE, and it waits until no
+        between the mode's normal size and its cap (League only). It only
+        works for a team already at the normal size, and it waits until no
         other team is still short of that size (those teams get the Bench
         first), unless an admin is the one clicking."""
         # Acknowledge the button press IMMEDIATELY, before any of the slower
@@ -1800,13 +1895,13 @@ class SessionCog(commands.Cog):
             await interaction.followup.send(f"Only {club_name}'s captain can request a sub.", ephemeral=True)
             return
 
-        # Hard ceiling: a team can never exceed config.TEAM_SIZE players,
+        # Hard ceiling: a team can never exceed the mode's cap,
         # subs included. Subs are only available while there's a free slot -
         # once someone is removed or transferred out, the slot opens again.
         # (The Add sub button is also greyed out at this point, but this
         # check stays as the real enforcement.)
         full_msg = (
-            f"{club_name} is already at its maximum of {config.TEAM_SIZE} players — "
+            f"{club_name} is already at its maximum of {_cap(state)} players — "
             f"a slot only opens up if someone is removed from the roster or transferred out."
         )
         blocked = self._sub_blocked_reason(state, team_id, club_name, extra, full_msg)
@@ -1840,8 +1935,8 @@ class SessionCog(commands.Cog):
                     f"{state['teams'][t]['club_name']} ({len(state['teams'][t]['on_field'])})" for t in turn_order
                 )
                 await interaction.followup.send(
-                    f"⏳ A {_ordinal(config.TEAM_SIZE)} player has to wait — these teams are still under "
-                    f"{config.NORMAL_TEAM_SIZE} and go first: {short}. An admin can override.",
+                    f"⏳ A {_ordinal(_cap(state))} player has to wait — these teams are still under "
+                    f"{_normal(state)} and go first: {short}. An admin can override.",
                     ephemeral=True,
                 )
                 return
@@ -1884,7 +1979,7 @@ class SessionCog(commands.Cog):
             # If they're currently active on a DIFFERENT team, transfer them
             # off it first - a player can only ever be registered to one
             # team's roster at a time. (Team voice channels are created at the
-            # full TEAM_SIZE ceiling and a roster can never exceed it, so
+            # full team cap and a roster can never exceed it, so
             # there's no per-channel capacity to adjust as people move.)
             for other_team_id, other_info in state["teams"].items():
                 if other_team_id != team_id and incoming.id in other_info["on_field"]:
@@ -1906,12 +2001,12 @@ class SessionCog(commands.Cog):
                 await voice_utils.allow_member_in_channel(bench_channel, incoming, connect=False)
 
         progress_channel = guild.get_channel(state["progress_channel_id"])
-        joined_as = f" as their {_ordinal(config.TEAM_SIZE)} player" if extra else ""
+        joined_as = f" as their {_ordinal(_cap(state))} player" if extra else ""
         await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench{joined_as}.")
         await self._refresh_team_roster(session_id)
         await self._log_action(
             session_id,
-            f"🔁 <@{interaction.user.id}> requested a {'extra (' + _ordinal(config.TEAM_SIZE) + ') player' if extra else 'sub'} "
+            f"🔁 <@{interaction.user.id}> requested a {'extra (' + _ordinal(_cap(state)) + ') player' if extra else 'sub'} "
             f"for **{club_name}** — <@{incoming.id}> came on.",
         )
 
@@ -1934,7 +2029,7 @@ class SessionCog(commands.Cog):
         Unlike request_sub, this doesn't require them to be on the Bench -
         it's for the case where a player is already active on one team but
         needs to move straight onto a different one. Shares the same
-        TEAM_SIZE hard ceiling and Bench-lock enforcement as a sub.
+        team-cap hard ceiling and Bench-lock enforcement as a sub.
         Returns (added: bool, moved: bool, reason: str | None) - added is
         False only if the hard cap blocked the transfer entirely (nothing
         changed); moved reflects whether the physical voice drag succeeded
@@ -1943,11 +2038,11 @@ class SessionCog(commands.Cog):
         # the same team: the ceiling check and the roster add below must happen atomically.
         async with state["sub_lock"]:
             # Same hard ceiling as Add Sub - a team can never exceed
-            # config.TEAM_SIZE players. Check this BEFORE touching anything, so a
+            # the mode's cap. Check this BEFORE touching anything, so a
             # blocked transfer doesn't still rip the player off their old team.
-            if len(state["teams"][dest_team_id]["on_field"]) >= config.TEAM_SIZE:
+            if len(state["teams"][dest_team_id]["on_field"]) >= _cap(state):
                 dest_club = state["teams"][dest_team_id]["club_name"]
-                return False, False, f"{dest_club} is already at its maximum of {config.TEAM_SIZE} players"
+                return False, False, f"{dest_club} is already at its maximum of {_cap(state)} players"
 
             # remove from any other team they're currently on
             stripped_captaincy_of = None
@@ -2042,7 +2137,7 @@ class SessionCog(commands.Cog):
         """Pulls a player off their team's roster entirely - not benched,
         not transferred, just gone. Frees their seat on the roster so someone
         else can actually be subbed/transferred in without hitting the
-        TEAM_SIZE hard ceiling (which also re-enables that team's Add sub
+        team cap (which also re-enables that team's Add sub
         button, since every roster change goes through _refresh_team_roster).
         Unlike a transfer, captaincy is ALWAYS cleared here (no admin
         exemption) since they're not on any team anymore at all. Their

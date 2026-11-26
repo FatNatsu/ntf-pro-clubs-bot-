@@ -16,8 +16,8 @@ async def create_session_category(guild: discord.Guild, session_id: int, mode: s
     return category
 
 
-async def create_team_voice_channel(guild, category, club_name, member_ids, captain_ids):
-    """Locked to TEAM_SIZE. Regular members can connect but are still subject
+async def create_team_voice_channel(guild, category, club_name, member_ids, captain_ids, user_limit, channel_name=None):
+    """Locked to user_limit (the mode's team cap). Regular members can connect but are still subject
     to that cap like anyone else. Captains get Move Members too, not just
     Connect - Discord's own voice channel user-limit specifically exempts
     anyone with Move Members on that channel, so this is what actually lets
@@ -36,9 +36,9 @@ async def create_team_voice_channel(guild, category, club_name, member_ids, capt
             overwrites[member] = discord.PermissionOverwrite(view_channel=True, connect=True, move_members=True)
 
     channel = await guild.create_voice_channel(
-        name=club_name,
+        name=channel_name or club_name,
         category=category,
-        user_limit=config.TEAM_SIZE,
+        user_limit=user_limit,
         overwrites=overwrites,
     )
     return channel
