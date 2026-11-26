@@ -1,0 +1,10 @@
+# Player data and secrets never go in the repo
+*.db
+*.db-journal
+.env
+*.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc

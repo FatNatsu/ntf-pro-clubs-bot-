@@ -1,0 +1,19 @@
+[Unit]
+Description=NTF Pro Clubs Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ntf-pro-clubs-bot-
+# The bot token and settings live in this file, outside the repo.
+# See deploy/ORACLE.md for what goes in it.
+EnvironmentFile=/etc/ntf-bot.env
+ExecStart=/home/ubuntu/ntf-pro-clubs-bot-/.venv/bin/python bot.py
+# Come back by itself after a crash or a server reboot.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
