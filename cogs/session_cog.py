@@ -1625,22 +1625,12 @@ class SessionCog(commands.Cog):
         slot["panel"], slot["sub_queue_message"] = None, None
 
         await self._send_with_retry(captains_channel.send, f"**━━━━━━━━━━ ROUND {round_no} ━━━━━━━━━━**")
-        control_embed = discord.Embed(
-            title=f"Round {round_no} • Match {n}/{total}: {club_a} vs {club_b}",
-            description="Captains: press **Match Live** at kick-off, then click the winner once the game finishes.",
-            color=ui.accent(state["mode"]),
-        )
-        for team_id in (team_a_id, team_b_id):
-            info = state["teams"][team_id]
-            mmrs = [db.get_player_mode_stats(state["guild_id"], pid, state["mode"])["mmr"] for pid in info["on_field"]]
-            avg_mmr = round(sum(mmrs) / len(mmrs)) if mmrs else 0
-            control_embed.add_field(
-                name=info["club_name"],
-                value=f"Captain: {_captain_display(info['captain_id'])}\nPlayers: {len(mmrs)}\nAvg MMR: {avg_mmr}",
-                inline=True,
-            )
+        slot["control_title"] = f"Round {round_no} • Match {n}/{total}: {club_a} vs {club_b}"
+        control_embed = self._build_control_embed(state, slot)
         match_view = MatchControlView(self, session_id, match["id"], team_a_id, club_a, team_b_id, club_b)
-        await self._send_with_retry(captains_channel.send, **ui.send_kwargs("captains", control_embed), view=match_view)
+        slot["control_message"] = await self._send_with_retry(
+            captains_channel.send, **ui.send_kwargs("captains", control_embed), view=match_view
+        )
 
         panel_view = CaptainPanelView(self, session_id, state["mode"])
         panel_view.sync_sub_buttons(state["teams"], self._sub_turn_team(state))
@@ -1734,6 +1724,25 @@ class SessionCog(commands.Cog):
                 except discord.HTTPException:
                     pass
 
+    def _build_control_embed(self, state, slot):
+        """The round card above the result buttons in a captains channel.
+        Rebuilt on every roster change so its player counts stay true."""
+        embed = discord.Embed(
+            title=slot["control_title"],
+            description="Captains: press **Match Live** at kick-off, then click the winner once the game finishes.",
+            color=ui.accent(state["mode"]),
+        )
+        for team_id in slot["team_ids"]:
+            info = state["teams"][team_id]
+            mmrs = [db.get_player_mode_stats(state["guild_id"], pid, state["mode"])["mmr"] for pid in info["on_field"]]
+            avg_mmr = round(sum(mmrs) / len(mmrs)) if mmrs else 0
+            embed.add_field(
+                name=info["club_name"],
+                value=f"Captain: {_captain_display(info['captain_id'])}\nPlayers: {len(mmrs)}\nAvg MMR: {avg_mmr}",
+                inline=True,
+            )
+        return embed
+
     async def _refresh_sub_buttons(self, session_id):
         """Re-syncs the Add sub button on every game's captain panel with the
         current rosters - it shows whose turn it is, and greys out when no
@@ -1752,6 +1761,12 @@ class SessionCog(commands.Cog):
                 await panel["message"].edit(view=panel["view"])
             except discord.HTTPException:
                 pass
+            control = slot.get("control_message")
+            if control and slot.get("control_title") and slot["team_ids"]:
+                try:
+                    await control.edit(**ui.edit_kwargs("captains", self._build_control_embed(state, slot)))
+                except discord.HTTPException:
+                    pass
 
     async def _sync_bench_visibility(self, guild, state):
         """The Bench only exists to feed subs onto teams, so while EVERY team

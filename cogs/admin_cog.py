@@ -553,6 +553,8 @@ class AdminCog(commands.Cog):
                 if real_member:
                     await voice_utils.allow_member_in_channel(bench_channel, real_member, connect=True)
                 await voice_utils.move_member_to_channel(guild, real_id, bench_channel)
+                # same refresh every real roster change gets: Add sub button, round card, Sub Queue
+                await session_cog._refresh_team_roster(session_id)
                 await interaction.followup.send(
                     f"🪑 You've been moved to the Bench so you can test BEING subbed in — "
                     f"click **any team's** Add Sub button (as an admin, from any device/account) to pull "
