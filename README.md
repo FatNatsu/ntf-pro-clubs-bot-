@@ -170,9 +170,10 @@ can post this panel; any player can then ready up from it.
     captains channel post the session summary — every team's win/loss
     record, ranked 🥇🥈🥉 down to last place. That stays up for **60
     seconds**, then every session category (Bench, each game's channels and
-    team VCs) is torn down automatically. The winner is recorded in
-    #session-history; the admin panel is removed and the final status stays
-    in the admin log as part of the record.
+    team VCs) is torn down automatically. **#session-history** keeps the
+    permanent record: the winner, the full final table and every score.
+    The admin panel is removed and the final status stays in the admin log
+    as part of the record.
 
 ## 5. Stats & leaderboard, anywhere, anytime
 

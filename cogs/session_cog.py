@@ -2024,6 +2024,7 @@ class SessionCog(commands.Cog):
         # entirely for test sessions, same as every other real-stat write.
         # Recording the winner for /session_history follows the same rule,
         # so test sessions never pollute the real history.
+        history_channel = None
         if not state["is_test"]:
             winning_players = state["teams"][winning_team_id]["on_field"]
             for pid in winning_players:
@@ -2033,13 +2034,7 @@ class SessionCog(commands.Cog):
             cfg = db.get_guild_config(state["guild_id"])
             history_channel_id = cfg.get("history_channel_id") if cfg else None
             history_channel = guild.get_channel(history_channel_id) if history_channel_id else None
-            if history_channel:
-                winning_club = state["teams"][winning_team_id]["club_name"]
-                winning_captain = state["teams"][winning_team_id]["captain_id"]
-                mode_label = "🏆 League" if state["mode"] == "league" else "⚔️ Rivals"
-                await history_channel.send(
-                    f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
-                )
+            # (the history post itself is sent further down, once the full table is built)
 
         lines = []
         for i, team_id in enumerate(team_ids_ranked):
@@ -2063,6 +2058,29 @@ class SessionCog(commands.Cog):
         footer = f"Test session — no MMR/stats were recorded. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds." if state["is_test"] else \
             f"All player MMR is already up to date. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds."
         embed.set_footer(text=footer)
+
+        # Permanent record: the winner line plus the WHOLE table and every
+        # score, since the match channels showing them are about to be
+        # deleted. Real sessions only - test sessions never reach history.
+        if history_channel:
+            winning_club = state["teams"][winning_team_id]["club_name"]
+            winning_captain = state["teams"][winning_team_id]["captain_id"]
+            mode_label = "🏆 League" if state["mode"] == "league" else "⚔️ Rivals"
+            history_embed = discord.Embed(
+                title=f"Session #{session_id} — Final Standings",
+                description="\n".join(lines),
+                color=discord.Color.gold(),
+            )
+            results = self._results_text(session_id)
+            if results:
+                history_embed.add_field(name="Results", value=results, inline=False)
+            try:
+                await history_channel.send(
+                    f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>.",
+                    embed=history_embed,
+                )
+            except discord.HTTPException:
+                pass
 
         # everyone sees the final table in each game's public match channel;
         # captains get it in their channel too
