@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import time
 
@@ -1984,10 +1985,15 @@ class SessionCog(commands.Cog):
         winner_club = state["teams"][winner_team_id]["club_name"]
 
         if not state["is_test"]:
-            await self._post_match_result(
-                interaction.guild, session_id, match, state, a_won, score_a, score_b, went_to_pens,
-                team_a_players, team_b_players, mmr_updates, mmr_deltas,
-            )
+            # the result is already saved - whatever goes wrong with the
+            # post must not stop the buttons flipping or the round moving on
+            try:
+                await self._post_match_result(
+                    interaction.guild, session_id, match, state, a_won, score_a, score_b, went_to_pens,
+                    team_a_players, team_b_players, mmr_updates, mmr_deltas,
+                )
+            except Exception:
+                logging.getLogger("ntf").exception("result post failed for match %s", match_id)
 
         # flip the control-room buttons: winner green + disabled, loser grey + disabled
         origin_view.btn_a.disabled = True

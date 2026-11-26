@@ -614,14 +614,16 @@ def reset_leaderboard(guild_id: int):
 
 
 def reset_sessions(guild_id: int):
-    """Season reset: removes every finished session this guild has played -
+    """Season reset: removes every session this guild has played -
     the sessions, their teams, matches and per-player/per-club results - so
-    the new season starts from session #1 again. Sessions still running are
-    left alone. The season-archive posts (season winners) live in Discord,
+    the new season starts from session #1 again. Every session row goes,
+    including ones still marked active: the caller has already checked no
+    session is really running, so those are leftovers from a bot restart
+    mid-session. The season-archive posts (season winners) live in Discord,
     not here, and are not touched. Returns how many sessions were removed."""
     with get_conn() as conn:
         ids = [r[0] for r in conn.execute(
-            "SELECT id FROM sessions WHERE guild_id=? AND status!='active'", (guild_id,)
+            "SELECT id FROM sessions WHERE guild_id=?", (guild_id,)
         ).fetchall()]
         if ids:
             marks = ",".join("?" * len(ids))

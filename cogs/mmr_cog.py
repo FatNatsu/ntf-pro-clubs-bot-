@@ -37,6 +37,7 @@ class LeaderboardPaginatorView(discord.ui.View):
         embed = leaderboard_utils.build_leaderboard_embed(
             rows, highlight_id=self.highlight_id, title=title,
             start_rank=self.page * LEADERBOARD_PAGE_SIZE + 1,
+            crown_id=season.crown_holder(self.guild_id, self.mode),
         )
         total_pages = max(1, (total + LEADERBOARD_PAGE_SIZE - 1) // LEADERBOARD_PAGE_SIZE)
         embed.set_footer(text=f"Page {self.page + 1}/{total_pages} — {total} tracked {self.mode} player(s) in this server")
@@ -87,7 +88,10 @@ class MMRCog(commands.Cog):
             return
 
         rows = db.mode_leaderboard(interaction.guild_id, mode, 10)
-        embed = leaderboard_utils.build_leaderboard_embed(rows, highlight_id=interaction.user.id, title=f"🏆 NTF {mode.title()} Leaderboard")
+        embed = leaderboard_utils.build_leaderboard_embed(
+            rows, highlight_id=interaction.user.id, title=f"🏆 NTF {mode.title()} Leaderboard",
+            crown_id=season.crown_holder(interaction.guild_id, mode), header=season.countdown_line(interaction.guild_id),
+        )
 
         db.ensure_player(interaction.guild_id, interaction.user.id, interaction.user.display_name)
         stats = db.get_player_mode_stats(interaction.guild_id, interaction.user.id, mode)

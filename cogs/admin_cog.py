@@ -112,6 +112,7 @@ class AdminCog(commands.Cog):
             if queue_cog:
                 await queue_cog.ensure_panel_in_channel(guild, queue_channel)
 
+        season.ensure_started(guild.id)  # so the countdown shows straight away, not on the next clock tick
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
         await interaction.response.send_message(
