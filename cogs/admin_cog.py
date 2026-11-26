@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -31,6 +32,15 @@ class ConfirmSeasonResetView(discord.ui.View):
         # valid for several minutes afterward, not just ~3 seconds.
         await interaction.response.defer(ephemeral=True)
 
+        # a reset wipes session records, so it can't run under a live session
+        session_cog = self.bot.get_cog("SessionCog")
+        if session_cog and any(s["guild_id"] == self.guild_id for s in session_cog.active_sessions.values()):
+            await interaction.edit_original_response(
+                content="A session is still running. End it first, then run the season reset again. Nothing was changed.",
+                view=None,
+            )
+            return
+
         # Snapshot BOTH ladders' top 5 to the season-archive channel BEFORE
         # anything gets wiped, since both are about to be reset together.
         cfg = db.get_guild_config(self.guild_id)
@@ -61,11 +71,30 @@ class ConfirmSeasonResetView(discord.ui.View):
             db.reset_mode_leaderboard(self.guild_id, mode)
             clubs_reset_total += db.reset_club_records(self.guild_id, mode)
         db.set_season_boundary(self.guild_id)
+        sessions_removed = db.reset_sessions(self.guild_id)
+
+        # session-history starts empty for the new season too; the
+        # season-archive channel (the season winners) is never touched.
+        # In the background - clearing a long channel can take a while.
+        history_id = cfg.get("history_channel_id") if cfg else None
+        history_channel = interaction.guild.get_channel(history_id) if history_id else None
+        if history_channel:
+            bot_id = self.bot.user.id
+
+            async def _clear_history():
+                try:
+                    await history_channel.purge(limit=None, check=lambda m: m.author.id == bot_id)
+                except discord.HTTPException:
+                    pass
+
+            asyncio.create_task(_clear_history())
+
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, interaction.guild)
         await interaction.edit_original_response(
             content=f"✅ **Season reset** — every player's MMR (both Rivals and League) is back to "
-                    f"{config.STARTING_MMR} with a clean record, and {clubs_reset_total} club result(s) across "
-                    f"both modes were cleared too.",
+                    f"{config.STARTING_MMR} with a clean record, {clubs_reset_total} club result(s) across "
+                    f"both modes were cleared, and {sessions_removed} past session(s) were removed so the new "
+                    f"season starts fresh. The season winners in the season archive were kept.",
             view=None,
         )
 
@@ -413,9 +442,10 @@ class AdminCog(commands.Cog):
             f"⚠️ This resets **every player's MMR in both Rivals and League** back to {config.STARTING_MMR} with a "
             f"clean win/loss record, AND wipes every **club's win/loss record** in both modes too. A snapshot of "
             f"both ladders' current top 5 will be posted to the season-archive channel first. Recent form, current "
-            f"streak, best club, most-played-with, and club top-player will all start fresh from this point too, "
-            f"so nothing looks contradictory next to the reset 0W-0L — head-to-head and permanent session history "
-            f"stay untouched. This can't be undone. Continue?",
+            f"streak, best club, most-played-with, and club top-player will all start fresh from this point too. "
+            f"**Every past session and its results are removed as well**, and the session-history channel is "
+            f"cleared, so session numbers start again. The season winners in the season archive are kept. "
+            f"This can't be undone. Continue?",
             view=ConfirmSeasonResetView(self.bot, interaction.guild_id),
             ephemeral=True,
         )

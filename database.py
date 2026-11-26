@@ -549,6 +549,35 @@ def reset_leaderboard(guild_id: int):
         )
 
 
+def reset_sessions(guild_id: int):
+    """Season reset: removes every finished session this guild has played -
+    the sessions, their teams, matches and per-player/per-club results - so
+    the new season starts from session #1 again. Sessions still running are
+    left alone. The season-archive posts (season winners) live in Discord,
+    not here, and are not touched. Returns how many sessions were removed."""
+    with get_conn() as conn:
+        ids = [r[0] for r in conn.execute(
+            "SELECT id FROM sessions WHERE guild_id=? AND status!='active'", (guild_id,)
+        ).fetchall()]
+        if ids:
+            marks = ",".join("?" * len(ids))
+            conn.execute(
+                f"DELETE FROM team_members WHERE team_id IN (SELECT id FROM teams WHERE session_id IN ({marks}))", ids
+            )
+            conn.execute(
+                f"DELETE FROM club_match_results WHERE match_id IN (SELECT id FROM matches WHERE session_id IN ({marks}))", ids
+            )
+            conn.execute(f"DELETE FROM match_participants WHERE session_id IN ({marks})", ids)
+            conn.execute(f"DELETE FROM matches WHERE session_id IN ({marks})", ids)
+            conn.execute(f"DELETE FROM teams WHERE session_id IN ({marks})", ids)
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", ids)
+        # session numbers are shared by every server this bot is in, so the
+        # count restarts from the highest number still in use (1 if none)
+        highest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM sessions").fetchone()[0]
+        conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='sessions'", (highest,))
+        return len(ids)
+
+
 def reset_club_records(guild_id: int, mode: str):
     """Season reset for clubs in ONE mode only - the other mode's club
     records are untouched (and so is best run / recent form, since those are
