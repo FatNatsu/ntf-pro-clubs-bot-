@@ -9,6 +9,7 @@ import mmr
 import mmr as mmr_module  # alias used specifically where a local variable/param would shadow the plain `mmr` name
 import voice_utils
 import leaderboard_utils
+import ui
 
 
 class ConfirmSeasonResetView(discord.ui.View):
@@ -38,7 +39,7 @@ class ConfirmSeasonResetView(discord.ui.View):
         if archive_channel:
             embed = discord.Embed(
                 title="🏅 Season Ended — Rivals & League Reset",
-                color=discord.Color.gold(),
+                color=ui.accent("neutral"),
             )
             for snap_mode, emoji in (("rivals", "⚔️"), ("league", "🏆")):
                 top5 = db.mode_leaderboard(self.guild_id, snap_mode, limit=5)
@@ -51,7 +52,7 @@ class ConfirmSeasonResetView(discord.ui.View):
                     lines = ["*no players tracked yet*"]
                 embed.add_field(name=f"{emoji} {snap_mode.title()} Top 5", value="\n".join(lines), inline=False)
             try:
-                await archive_channel.send(embed=embed)
+                await archive_channel.send(**ui.send_kwargs("season_archive", embed))
             except discord.HTTPException:
                 pass
 

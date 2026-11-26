@@ -186,8 +186,9 @@ can post this panel; any player can then ready up from it.
 Panels carry a banner strip on top and an accent colour down the left edge:
 cyan for League, purple for Rivals, grey-blue for admin and shared panels.
 The banner pictures live in `assets/banners/` (`queue`, `ready_check_league`,
-`ready_check_rivals`, `match`, `captains`, `sub_queue`, and later `admin`,
-`session_history`). A banner that isn't there yet is simply skipped, so
+`ready_check_rivals`, `match`, `captains`, `sub_queue`, `admin`,
+`leaderboard`, `session_history`, `season_archive`). A banner file that is
+missing is simply skipped, so
 adding one is just dropping a `.jpg` with the right name into that folder.
 The shared helpers are in `ui.py`.
 

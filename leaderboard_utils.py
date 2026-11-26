@@ -2,9 +2,10 @@ import discord
 
 import database as db
 import mmr
+import ui
 
 
-def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard", start_rank=1):
+def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard", start_rank=1, colour=None):
     lines = []
     for i, p in enumerate(rows, start=start_rank):
         letter = mmr.rank_for_mmr(p["mmr"])
@@ -15,7 +16,7 @@ def build_leaderboard_embed(rows, highlight_id=None, title="🏆 NTF Leaderboard
     embed = discord.Embed(
         title=title,
         description="\n".join(lines) if lines else "No players tracked yet — get a session going!",
-        color=discord.Color.gold(),
+        color=colour if colour is not None else discord.Color.gold(),
     )
     return embed
 
@@ -25,7 +26,7 @@ async def _refresh_one_mode_leaderboard(guild: discord.Guild, channel: discord.T
     specific mode. Rivals and League each get their own message in the
     same #leaderboard channel, tracked independently."""
     rows = db.mode_leaderboard(guild.id, mode, 10)
-    embed = build_leaderboard_embed(rows, title=f"🏆 NTF {mode.title()} Leaderboard")
+    embed = build_leaderboard_embed(rows, title=f"🏆 NTF {mode.title()} Leaderboard", colour=ui.accent(mode))
     embed.set_footer(text=f"Run /leaderboard mode:{mode} anywhere to see your own rank highlighted, even outside the top 10.")
 
     message_id_key = f"leaderboard_message_id_{mode}"
@@ -37,14 +38,25 @@ async def _refresh_one_mode_leaderboard(guild: discord.Guild, channel: discord.T
         except (discord.NotFound, discord.HTTPException):
             message = None
 
+    # The banner sits on the first leaderboard only (Rivals), so the channel
+    # opens with one header strip instead of two identical ones. A message
+    # posted before banners existed has no picture attached, so it keeps its
+    # plain look rather than pointing at an image that isn't there.
+    banner = "leaderboard" if mode == "rivals" else None
     if message:
         try:
-            await message.edit(embed=embed)
+            if banner and getattr(message, "attachments", None):
+                await message.edit(**ui.edit_kwargs(banner, embed))
+            else:
+                await message.edit(embed=embed)
             return
         except discord.HTTPException:
             pass
 
-    message = await channel.send(embed=embed)
+    if banner:
+        message = await channel.send(**ui.send_kwargs(banner, embed))
+    else:
+        message = await channel.send(embed=embed)
     db.upsert_guild_config(guild.id, **{message_id_key: message.id})
 
 
