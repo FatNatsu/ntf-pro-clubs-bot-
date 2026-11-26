@@ -1299,6 +1299,8 @@ class SessionCog(commands.Cog):
         await self._post_team_overview(guild, session_id)
         await self._post_team_roster(guild, session_id)
         control_channel_obj = guild.get_channel(control_channel.id)
+        # a full pop can start with every team already at its cap (Rivals at 22)
+        await self._sync_bench_visibility(guild, self.active_sessions[session_id])
         control_view = SessionControlPanelView(self, session_id, teams_state, mode)
         # a team that starts already at the roster ceiling begins greyed out, and the team
         # with the fewest players starts with the turn
@@ -1395,6 +1397,30 @@ class SessionCog(commands.Cog):
         except discord.HTTPException:
             pass
 
+    async def _sync_bench_visibility(self, guild, state):
+        """The Bench only exists to feed subs onto teams, so while EVERY team
+        is at its hard cap (League 7, Rivals 11) there is nothing it can do
+        and it is hidden from the server. The moment any team drops below
+        its cap (a player removed or transferred out) it comes back. Derived
+        from the rosters every time, so it can't get stuck either way.
+        Hiding is done on the @everyone permission only: the channel itself,
+        its id and everything that points at it stay exactly as they are."""
+        all_full = bool(state["teams"]) and all(
+            len(info["on_field"]) >= _cap(state) for info in state["teams"].values()
+        )
+        if state.get("bench_hidden", False) == all_full:
+            return
+        bench_channel = guild.get_channel(state["bench_channel_id"])
+        if not bench_channel:
+            return
+        try:
+            await bench_channel.set_permissions(
+                guild.default_role, view_channel=not all_full, connect=not all_full
+            )
+        except discord.HTTPException:
+            return  # leave the flag alone so the next roster change tries again
+        state["bench_hidden"] = all_full
+
     def _schedule_team_name_sync(self, guild, state, team_id):
         """Keeps a team's voice channel name in step with whether the team is
         at its cap ("<club> - MAX Players") or not ("<club>"). Runs in the
@@ -1441,6 +1467,7 @@ class SessionCog(commands.Cog):
         if guild:
             for team_id in state["teams"]:
                 self._schedule_team_name_sync(guild, state, team_id)
+            await self._sync_bench_visibility(guild, state)
         message = state.get("roster_message")
         if not message:
             return

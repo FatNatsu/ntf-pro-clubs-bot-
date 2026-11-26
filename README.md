@@ -111,6 +111,10 @@ can post this panel; any player can then ready up from it.
      "<club> - MAX Players"; the name goes back when a seat opens. Discord
      only lets a channel be renamed about twice every ten minutes, so the
      name can lag behind.
+   - While **every** team is at its hard cap (7 in League, 11 in Rivals) the
+     Bench channel is hidden, since nobody can be subbed on. It reappears as
+     soon as a player is removed or transferred out. In League the Bench
+     stays visible while teams sit at 6, because a 7th can still be requested.
    - A team channel's user limit is the cap **plus** one for every spectator
      watching it and every admin sitting in it who isn't on the team (11
      becomes 13 with two extra), and drops back when they leave.
