@@ -6,6 +6,8 @@ from discord.ext import commands
 
 import database as db
 import mmr
+import season
+import ui
 
 
 def _form_string(form_list):
@@ -46,8 +48,13 @@ class StatsCog(commands.Cog):
 
         embed = discord.Embed(
             title=f"👤 {member.display_name}'s Profile",
-            color=discord.Color.blurple(),
+            description=season.countdown_line(guild_id),  # which season these numbers belong to
+            color=ui.accent("neutral"),
         )
+        crown = {
+            m: "\n👑 Golden Crown — most wins last season" if season.crown_holder(guild_id, m) == member.id else ""
+            for m in ("rivals", "league")
+        }
         if member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
 
@@ -56,7 +63,7 @@ class StatsCog(commands.Cog):
             value=(
                 f"**{mmr.rank_for_mmr(rivals_stats['mmr'])}**\n"
                 f"{rivals_stats['mmr']} MMR — {rivals_stats['wins']}W - {rivals_stats['losses']}L\n{_streak_string(*rivals_streak)}\n"
-                f"{mmr.rank_progress_bar(rivals_stats['mmr'])}"
+                f"{mmr.rank_progress_bar(rivals_stats['mmr'])}{crown['rivals']}"
             ),
             inline=True,
         )
@@ -65,7 +72,7 @@ class StatsCog(commands.Cog):
             value=(
                 f"**{mmr.rank_for_mmr(league_stats['mmr'])}**\n"
                 f"{league_stats['mmr']} MMR — {league_stats['wins']}W - {league_stats['losses']}L\n{_streak_string(*league_streak)}\n"
-                f"{mmr.rank_progress_bar(league_stats['mmr'])}"
+                f"{mmr.rank_progress_bar(league_stats['mmr'])}{crown['league']}"
             ),
             inline=True,
         )
@@ -109,7 +116,7 @@ class StatsCog(commands.Cog):
             )
             return
 
-        embed = discord.Embed(title=f"⚔️ {player_a.display_name} vs {player_b.display_name}", color=discord.Color.orange())
+        embed = discord.Embed(title=f"⚔️ {player_a.display_name} vs {player_b.display_name}", color=ui.accent("neutral"))
         embed.add_field(name=player_a.display_name, value=f"**{a_wins}** win(s)", inline=True)
         embed.add_field(name=player_b.display_name, value=f"**{b_wins}** win(s)", inline=True)
         embed.set_footer(text=f"{total} meeting(s) as opponents (games where they were teammates don't count here)")
@@ -130,7 +137,7 @@ class StatsCog(commands.Cog):
             lines.append(f"**#{row['id']}** — {mode_label} — **{row['winning_club']}** (captain <@{row['winning_captain']}>) — {date_str}")
 
         title = f"📜 {mode.title()} Session History" if mode else "📜 Session History"
-        embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.blurple())
+        embed = discord.Embed(title=title, description="\n".join(lines), color=ui.accent("neutral"))
         embed.set_footer(text="Most recent 10 completed sessions. Test sessions never appear here.")
         await interaction.response.send_message(embed=embed)
 
@@ -153,7 +160,7 @@ class StatsCog(commands.Cog):
         league_best_run = db.get_club_best_run(guild_id, club_name, "league")
         top_player = db.get_club_top_player(guild_id, club_name)
 
-        embed = discord.Embed(title=f"🛡️ {club_name}", color=discord.Color.dark_gold())
+        embed = discord.Embed(title=f"🛡️ {club_name}", color=ui.accent("neutral"))
         embed.add_field(
             name="⚔️ Rivals",
             value=f"{rivals_record['wins']}W - {rivals_record['losses']}L\n{_streak_string(*rivals_streak)}\nBest run: {rivals_best_run} wins in a row",

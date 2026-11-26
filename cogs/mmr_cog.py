@@ -8,6 +8,7 @@ import database as db
 import mmr
 import leaderboard_utils
 import season
+import ui
 
 LEADERBOARD_PAGE_SIZE = 25
 
@@ -67,7 +68,7 @@ class MMRCog(commands.Cog):
         p = db.get_player(interaction.guild_id, member.id)
         stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
         letter = mmr.rank_for_mmr(stats["mmr"])
-        embed = discord.Embed(title=f"{member.display_name}'s {mode.title()} Rank", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"{member.display_name}'s {mode.title()} Rank", color=ui.accent(mode))
         embed.add_field(name="Rank", value=f"**{letter}**", inline=True)
         embed.add_field(name="MMR", value=str(stats["mmr"]), inline=True)
         embed.add_field(name="Record", value=f"{stats['wins']}W - {stats['losses']}L", inline=True)
