@@ -58,39 +58,36 @@ class StatsCog(commands.Cog):
         if member.display_avatar:
             embed.set_thumbnail(url=member.display_avatar.url)
 
-        embed.add_field(
-            name="⚔️ Rivals",
-            value=(
-                f"**{mmr.rank_for_mmr(rivals_stats['mmr'])}**\n"
-                f"{rivals_stats['mmr']} MMR — {rivals_stats['wins']}W - {rivals_stats['losses']}L\n{_streak_string(*rivals_streak)}\n"
-                f"{mmr.rank_progress_bar(rivals_stats['mmr'])}{crown['rivals']}"
-            ),
-            inline=True,
-        )
-        embed.add_field(
-            name="🏆 League",
-            value=(
-                f"**{mmr.rank_for_mmr(league_stats['mmr'])}**\n"
-                f"{league_stats['mmr']} MMR — {league_stats['wins']}W - {league_stats['losses']}L\n{_streak_string(*league_streak)}\n"
-                f"{mmr.rank_progress_bar(league_stats['mmr'])}{crown['league']}"
-            ),
-            inline=True,
-        )
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
+        # Full-width blocks, one under another: reads the same on a phone
+        # and a computer, with no empty spacer gaps.
+        for label, stats, streak, form, key in (
+            ("⚔️ Rivals", rivals_stats, rivals_streak, rivals_form, "rivals"),
+            ("🏆 League", league_stats, league_streak, league_form, "league"),
+        ):
+            embed.add_field(
+                name=label,
+                value=(
+                    f"**{mmr.rank_for_mmr(stats['mmr'])}** · {stats['mmr']} MMR · {stats['wins']}W - {stats['losses']}L\n"
+                    f"{mmr.rank_progress_bar(stats['mmr'])}\n"
+                    + (f"Streak: {_streak_string(*streak)}\nForm: {_form_string(form)}" if form else "*No matches played yet*")
+                    + crown[key]
+                ),
+                inline=False,
+            )
 
-        embed.add_field(name="Rivals Recent Form", value=_form_string(rivals_form), inline=True)
-        embed.add_field(name="League Recent Form", value=_form_string(league_form), inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
-
-        if best_club:
-            embed.add_field(name="Best Club", value=f"**{best_club['club_name']}** ({best_club['wins']} wins)", inline=True)
-        else:
-            embed.add_field(name="Best Club", value="*no wins recorded yet*", inline=True)
-
-        if best_mate:
-            embed.add_field(name="Most Played With", value=f"<@{best_mate['teammate_id']}> ({best_mate['games']} games)", inline=True)
-        else:
-            embed.add_field(name="Most Played With", value="*not enough data yet*", inline=True)
+        best_teammate = db.get_player_best_teammate(guild_id, member.id)
+        rival = db.get_player_rival(guild_id, member.id)
+        highlights = [
+            f"🛡️ **Best club:** {best_club['club_name']} ({best_club['wins']} wins)" if best_club
+            else "🛡️ **Best club:** *no wins yet*",
+            f"🤝 **Best teammate:** <@{best_teammate['teammate_id']}> ({best_teammate['wins']} wins in {best_teammate['games']} games together)"
+            if best_teammate else "🤝 **Best teammate:** *no wins together yet*",
+            f"👥 **Most played with:** <@{best_mate['teammate_id']}> ({best_mate['games']} games)" if best_mate
+            else "👥 **Most played with:** *not enough games yet*",
+            f"😈 **Rival:** <@{rival['opponent_id']}> (lost to them {rival['losses']} times in {rival['games']} games)" if rival
+            else "😈 **Rival:** *no losses yet*",
+        ]
+        embed.add_field(name="This season", value="\n".join(highlights), inline=False)
 
         if p["is_captain"]:
             embed.set_footer(text="🎖️ Whitelisted captain")

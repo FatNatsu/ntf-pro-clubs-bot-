@@ -1199,6 +1199,43 @@ def get_player_most_played_with(guild_id, player_id):
         return dict(row) if row else None
 
 
+def get_player_best_teammate(guild_id, player_id):
+    """Teammate this player has WON the most games alongside this season
+    (ties: fewer games together, so the better win rate). None without a
+    shared win. Returns {teammate_id, wins, games}."""
+    season_clause, season_params = _season_filter(guild_id)
+    with get_conn() as conn:
+        row = conn.execute(
+            f"SELECT mp2.player_id AS teammate_id, "
+            f"SUM(CASE WHEN mp1.result='win' THEN 1 ELSE 0 END) AS wins, COUNT(*) AS games "
+            f"FROM match_participants mp1 "
+            f"JOIN match_participants mp2 "
+            f"  ON mp1.match_id = mp2.match_id AND mp1.team_id = mp2.team_id AND mp1.player_id != mp2.player_id "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"GROUP BY mp2.player_id HAVING wins > 0 ORDER BY wins DESC, games ASC LIMIT 1",
+            (guild_id, player_id, *season_params),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_player_rival(guild_id, player_id):
+    """Opponent this player has LOST to the most this season (ties: more
+    games against them). None without a loss. Returns {opponent_id, losses, games}."""
+    season_clause, season_params = _season_filter(guild_id)
+    with get_conn() as conn:
+        row = conn.execute(
+            f"SELECT mp2.player_id AS opponent_id, "
+            f"SUM(CASE WHEN mp1.result='loss' THEN 1 ELSE 0 END) AS losses, COUNT(*) AS games "
+            f"FROM match_participants mp1 "
+            f"JOIN match_participants mp2 "
+            f"  ON mp1.match_id = mp2.match_id AND mp1.team_id != mp2.team_id "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"GROUP BY mp2.player_id HAVING losses > 0 ORDER BY losses DESC, games DESC LIMIT 1",
+            (guild_id, player_id, *season_params),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def get_club_record(guild_id, club_name, mode):
     with get_conn() as conn:
         row = conn.execute(
