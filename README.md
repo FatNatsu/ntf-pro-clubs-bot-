@@ -113,7 +113,10 @@ can post this panel; any player can then ready up from it.
 8. Each game's **public match channel** shows both teams, their captains
    and players, whether the game is waiting, live or finished, and
    **👀 Watch \<Club\>** buttons that let anyone already in a voice channel
-   spectate (auto-muted). **#in-progress** keeps the round-by-round score
+   spectate (auto-muted). Under the rosters a **Recent changes** list shows
+   the latest subs, transfers, removals and captain changes for **those two
+   teams only** (a transfer between the two games shows in both).
+   **#in-progress** no longer announces these; it keeps the round-by-round score
    cards (🟩 winner 👑 / 🟥 loser) and the final standings.
 9. The **captain panel** acts on the team of whoever presses it:
    - **🔁 Add sub** pulls a player from Bench straight onto your team

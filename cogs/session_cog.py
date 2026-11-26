@@ -1446,6 +1446,21 @@ class SessionCog(commands.Cog):
         team_id = self.captained_team(state, interaction.user.id)
         return team_id is not None and player_id in state["teams"][team_id]["on_field"]
 
+    def _note_team_event(self, state, team_ids, text):
+        """Remembers a roster change (sub, transfer, removal, captain
+        change) against the team(s) it involved. Each game's public match
+        channel shows the latest few for ITS two teams only, under the
+        rosters - so a change is seen where it matters and nowhere else.
+        Shown on the next roster refresh, which every caller does anyway."""
+        events = state.setdefault("team_events", [])
+        events.append(({t for t in team_ids if t is not None}, text))
+        del events[:-60]  # plenty for a session; keeps the list from growing forever
+
+    def _recent_changes_text(self, state, team_ids, limit=6):
+        wanted = set(team_ids)
+        lines = [text for teams, text in state.get("team_events", []) if teams & wanted][-limit:]
+        return "\n".join(lines)[:1024]
+
     def _match_status_text(self, state, match) -> str:
         if match["status"] == "reported":
             score = f"{match['score_a']}-{match['score_b']}" if match["score_a"] is not None else "final"
@@ -1477,6 +1492,9 @@ class SessionCog(commands.Cog):
                 value=f"**Captain:** {_captain_display(info['captain_id'])}\n{member_lines}",
                 inline=True,
             )
+        changes = self._recent_changes_text(state, slot["team_ids"])
+        if changes:
+            embed.add_field(name="Recent changes", value=changes, inline=False)
         embed.set_footer(text="Press a Watch button to spectate that team (you join muted).")
         return embed
 
@@ -2331,10 +2349,12 @@ class SessionCog(commands.Cog):
             # team's roster at a time. (Team voice channels are created at the
             # full team cap and a roster can never exceed it, so
             # there's no per-channel capacity to adjust as people move.)
+            left_team_id = None
             for other_team_id, other_info in state["teams"].items():
                 if other_team_id != team_id and incoming.id in other_info["on_field"]:
                     other_info["on_field"].discard(incoming.id)
                     db.set_member_role(other_team_id, incoming.id, "sub")
+                    left_team_id = other_team_id
                     break
 
             await voice_utils.allow_member_in_channel(team_channel, incoming, connect=True)
@@ -2350,9 +2370,10 @@ class SessionCog(commands.Cog):
             if bench_channel:
                 await voice_utils.allow_member_in_channel(bench_channel, incoming, connect=False)
 
-        progress_channel = guild.get_channel(state["progress_channel_id"])
         joined_as = f" as their {_ordinal(_cap(state))} player" if extra else ""
-        await progress_channel.send(f"🔁 <@{incoming.id}> joins **{club_name}** from the bench{joined_as}.")
+        self._note_team_event(
+            state, {team_id, left_team_id}, f"🔁 <@{incoming.id}> joined **{club_name}** from the bench{joined_as}"
+        )
         await self._refresh_team_roster(session_id)
         await self._log_action(
             session_id,
@@ -2404,10 +2425,12 @@ class SessionCog(commands.Cog):
 
             # remove from any other team they're currently on
             stripped_captaincy_of = None
+            from_team_id = None
             for other_team_id, other_info in state["teams"].items():
                 if other_team_id != dest_team_id and player_id in other_info["on_field"]:
                     other_info["on_field"].discard(player_id)
                     db.set_member_role(other_team_id, player_id, "sub")
+                    from_team_id = other_team_id
 
                     # A captain who transfers away loses that team's captaincy -
                     # they're no longer even rostered there, so it shouldn't
@@ -2439,10 +2462,11 @@ class SessionCog(commands.Cog):
                 await voice_utils.allow_member_in_channel(bench_channel, member, connect=False)
 
             club_name = state["teams"][dest_team_id]["club_name"]
-            progress_channel = guild.get_channel(state["progress_channel_id"])
-            if progress_channel:
-                note = f" ⚠️ They were {stripped_captaincy_of}'s captain — that team needs a new one via Reassign Captain." if stripped_captaincy_of else ""
-                await progress_channel.send(f"🔄 <@{player_id}> has been transferred to **{club_name}**.{note}")
+            came_from = f" from **{state['teams'][from_team_id]['club_name']}**" if from_team_id is not None else ""
+            note = f" ⚠️ {stripped_captaincy_of} needs a new captain" if stripped_captaincy_of else ""
+            self._note_team_event(
+                state, {dest_team_id, from_team_id}, f"🔄 <@{player_id}> transferred{came_from} to **{club_name}**{note}"
+            )
             await self._refresh_team_roster(session_id)
 
             return True, moved, reason
@@ -2481,9 +2505,7 @@ class SessionCog(commands.Cog):
             # _refresh_team_roster below (via _sync_captains_access)
 
         club_name = state["teams"][team_id]["club_name"]
-        progress_channel = guild.get_channel(state["progress_channel_id"])
-        if progress_channel:
-            await progress_channel.send(f"🎖️ <@{new_captain_id}> is now captaining **{club_name}** (previously <@{old_captain_id}>).")
+        self._note_team_event(state, {team_id}, f"🎖️ <@{new_captain_id}> is now captaining **{club_name}**")
         await self._refresh_team_roster(session_id)
 
     # -------------------------------------------------------------- full removal
@@ -2512,10 +2534,8 @@ class SessionCog(commands.Cog):
             await voice_utils.allow_member_in_channel(bench_channel, member, connect=True)
 
         club_name = info["club_name"]
-        progress_channel = guild.get_channel(state["progress_channel_id"])
-        if progress_channel:
-            note = f" ⚠️ They were {club_name}'s captain — that team needs a new one via Reassign Captain." if was_captain else ""
-            await progress_channel.send(f"❌ <@{player_id}> has been removed from **{club_name}**'s roster entirely.{note}")
+        note = " ⚠️ they were captain — a new one is needed" if was_captain else ""
+        self._note_team_event(state, {team_id}, f"❌ <@{player_id}> removed from **{club_name}**{note}")
         await self._refresh_team_roster(session_id)
 
     # -------------------------------------------------------------- end
