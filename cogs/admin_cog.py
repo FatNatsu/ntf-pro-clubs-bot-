@@ -88,7 +88,7 @@ class AdminCog(commands.Cog):
     girl_group = app_commands.Group(name="girl", description="Manage this server's girl whitelist - keeps them together on the same team")
 
     # ------------------------------------------------------------- one-time setup
-    @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent #ntf-queue, #in-progress and #leaderboard channels")
+    @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent NTF channels (queue, leaderboard, history, admin log, season archive)")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def ntf_setup(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -98,10 +98,6 @@ class AdminCog(commands.Cog):
         queue_channel_is_new = queue_channel is None
         if queue_channel is None:
             queue_channel = await voice_utils.create_queue_channel(guild)
-
-        progress_channel = guild.get_channel(cfg.get("progress_channel_id")) if cfg.get("progress_channel_id") else None
-        if progress_channel is None:
-            progress_channel = await voice_utils.create_progress_text_channel(guild, category=None)
 
         leaderboard_channel = guild.get_channel(cfg.get("leaderboard_channel_id")) if cfg.get("leaderboard_channel_id") else None
         if leaderboard_channel is None:
@@ -122,7 +118,6 @@ class AdminCog(commands.Cog):
         db.upsert_guild_config(
             guild.id,
             queue_channel_id=queue_channel.id,
-            progress_channel_id=progress_channel.id,
             leaderboard_channel_id=leaderboard_channel.id,
             history_channel_id=history_channel.id,
             admin_log_channel_id=admin_log_channel.id,
@@ -134,11 +129,10 @@ class AdminCog(commands.Cog):
             if queue_cog:
                 await queue_cog.ensure_panel_in_channel(guild, queue_channel)
 
-        await progress_channel.send("🚫 No games are currently in progress.")
         await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
         await interaction.response.send_message(
-            f"✅ NTF is set up for this server — {queue_channel.mention}, {progress_channel.mention}, "
+            f"✅ NTF is set up for this server — {queue_channel.mention}, "
             f"{leaderboard_channel.mention}, {history_channel.mention}, {admin_log_channel.mention}, and "
             f"{season_archive_channel.mention} are ready. "
             f"⚠️ **One manual step needed**: {admin_log_channel.mention} is hidden from everyone by default since "

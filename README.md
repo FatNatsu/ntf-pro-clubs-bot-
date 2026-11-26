@@ -32,10 +32,13 @@ that's your whole database.
 ```
 /ntf_setup
 ```
-Creates (or locates, if you rename/move them) the two **permanent** channels:
-- 📺 **#in-progress** — live match updates, and "no games are currently in
-  progress" when nothing's running
+Creates (or locates, if you rename/move them) the **permanent** channels:
+- the NTF queue channel, where players ready up
 - 🏆 **#leaderboard** — one live-updated leaderboard message, top 20 by MMR
+- 📜 **#session-history**, 🔒 **#admin-log** and 🏅 **#season-archive**
+
+There is no permanent "in-progress" channel any more: while a session runs,
+each game's public match channel shows everything (see step 8).
 
 Then:
 ```
@@ -115,9 +118,10 @@ can post this panel; any player can then ready up from it.
    **👀 Watch \<Club\>** buttons that let anyone already in a voice channel
    spectate (auto-muted). Under the rosters a **Recent changes** list shows
    the latest subs, transfers, removals and captain changes for **those two
-   teams only** (a transfer between the two games shows in both).
-   **#in-progress** no longer announces these; it keeps the round-by-round score
-   cards (🟩 winner 👑 / 🟥 loser) and the final standings.
+   teams only** (a transfer between the two games shows in both), and a
+   **Results so far** list shows every score reported this session, from
+   both games. It is all one message the bot keeps up to date, so nothing
+   scrolls away. The final standings are posted here too.
 9. The **captain panel** acts on the team of whoever presses it:
    - **🔁 Add sub** pulls a player from Bench straight onto your team
      (longest-waiting players first, best MMR fit among them). The turn
@@ -162,13 +166,13 @@ can post this panel; any player can then ready up from it.
     session is admin-only; captains no longer have that button. If a server
     has no admin log set up, admins still have `/force_end_session` and
     `/admin_end_all_sessions`.
-12. When the final round completes, **#in-progress** and each captains
-    channel post the session summary — every team's win/loss record, ranked
-    🥇🥈🥉 down to last place. That stays up for **60 seconds**, then every
-    session category (Bench, each game's channels and team VCs) is torn
-    down automatically and #in-progress posts **"No games are currently in
-    progress."** The admin panel is removed; the final status stays in the
-    admin log as part of the record.
+12. When the final round completes, each game's public match channel and
+    captains channel post the session summary — every team's win/loss
+    record, ranked 🥇🥈🥉 down to last place. That stays up for **60
+    seconds**, then every session category (Bench, each game's channels and
+    team VCs) is torn down automatically. The winner is recorded in
+    #session-history; the admin panel is removed and the final status stays
+    in the admin log as part of the record.
 
 ## 5. Stats & leaderboard, anywhere, anytime
 

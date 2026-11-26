@@ -1,7 +1,6 @@
 """
 All the guild-channel plumbing: creating the session category, the locked
-team voice channels, the bench, each game's public and captains-only channels, and the
-public in-progress text channel - plus moving members around.
+team voice channels, the bench, each game's public and captains-only channels - plus moving members around.
 
 Split out from the cogs so the Discord-API-shaped code is in one place.
 """
@@ -84,22 +83,6 @@ async def create_private_text_channel(guild, category, name):
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
     return await guild.create_text_channel(name=name, category=category, overwrites=overwrites)
-
-
-async def create_progress_text_channel(guild, category=None):
-    """Public read-only feed: everyone can view, only the bot can post.
-    Pass category=None to create it as a permanent top-level channel
-    (used for the guild-wide #in-progress channel set up once via /ntf_setup)."""
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
-        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-    }
-    channel = await guild.create_text_channel(
-        name=config.IN_PROGRESS_CHANNEL_NAME,
-        category=category,
-        overwrites=overwrites,
-    )
-    return channel
 
 
 async def create_leaderboard_channel(guild):

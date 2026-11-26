@@ -187,7 +187,6 @@ class MatchControlView(discord.ui.View):
 
             state = self.cog.active_sessions.get(self.session_id)
             if state:
-                await self.cog._update_progress_field_reset(self.session_id, self.match_id, self.team_a_club, self.team_b_club)
                 await self.cog._refresh_status(self.session_id)
                 await self.cog._log_action(
                     self.session_id,
@@ -228,7 +227,6 @@ class MatchControlView(discord.ui.View):
             self.btn_live.label = "Rosters Locked"
             self.btn_pause.disabled = False
             await interaction.response.edit_message(view=self)
-            await self.cog._mark_progress_field_live(self.session_id, self.match_id)
             await self.cog._refresh_status(self.session_id)
             await self.cog._log_action(
                 self.session_id,
@@ -264,7 +262,6 @@ class MatchControlView(discord.ui.View):
             self.btn_live.disabled = False
             self.btn_live.label = "Resume Match"
             await interaction.response.edit_message(view=self)
-            await self.cog._mark_progress_field_paused(self.session_id, self.match_id)
             await self.cog._refresh_status(self.session_id)
             await self.cog._log_action(
                 self.session_id,
@@ -1162,15 +1159,6 @@ class SessionCog(commands.Cog):
                 players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
         return players
 
-    async def _get_or_create_progress_channel(self, guild: discord.Guild):
-        cfg = db.get_guild_config(guild.id) or {}
-        channel = guild.get_channel(cfg.get("progress_channel_id")) if cfg.get("progress_channel_id") else None
-        if channel is None:
-            channel = await voice_utils.create_progress_text_channel(guild, category=None)
-            db.upsert_guild_config(guild.id, progress_channel_id=channel.id)
-        return channel
-
-    # -------------------------------------------------------------- start
     async def start_session(self, guild: discord.Guild, mode: str, players: list, announce_channel_id: int, is_test: bool = False):
         num_teams = config.MODE_TEAMS[mode]
         actual_count = len(players)
@@ -1202,7 +1190,6 @@ class SessionCog(commands.Cog):
             slot_categories.append(
                 await voice_utils.create_named_category(guild, f"{prefix} · {config.MATCH_CATEGORY_LABEL} {n}")
             )
-        progress_channel = await self._get_or_create_progress_channel(guild)
 
         # All the channels this session needs are independent of each other
         # (different channels, no shared state) - create them all at once
@@ -1334,7 +1321,7 @@ class SessionCog(commands.Cog):
 
         db.set_session_channels(
             session_id, category_id=category.id, bench_id=bench_channel.id,
-            control_id=slots[0]["captains_channel_id"], progress_id=progress_channel.id,
+            control_id=slots[0]["captains_channel_id"],
         )
 
         # anyone drafted beyond initial_team_size (only happens if actual_count
@@ -1366,13 +1353,11 @@ class SessionCog(commands.Cog):
             "bench_channel_id": bench_channel.id,
             "sub_queue_channel_id": sub_queue_channel.id,
             "slots": slots,
-            "progress_channel_id": progress_channel.id,
             "category_id": category.id,  # the Bench category
             "category_ids": [category.id] + [c.id for c in slot_categories],  # everything to tear down at the end
             "announce_channel_id": announce_channel_id,
             "current_round": 1,
             "total_rounds": len(rounds),
-            "progress_round_message": None,
             "auto_close_task": None,
             "sub_lock": asyncio.Lock(),
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
@@ -1461,6 +1446,23 @@ class SessionCog(commands.Cog):
         lines = [text for teams, text in state.get("team_events", []) if teams & wanted][-limit:]
         return "\n".join(lines)[:1024]
 
+    def _results_text(self, session_id) -> str:
+        """Every result reported so far this session, both games - so each
+        public match channel doubles as the scoreboard."""
+        state = self.active_sessions[session_id]
+        lines = []
+        for m in db.get_matches_for_session(session_id):
+            if m["status"] != "reported":
+                continue
+            club_a = state["teams"][m["team_a_id"]]["club_name"]
+            club_b = state["teams"][m["team_b_id"]]["club_name"]
+            a_won = m["winner_team_id"] == m["team_a_id"]
+            left = f"👑 **{club_a}**" if a_won else club_a
+            right = f"**{club_b}** 👑" if not a_won else club_b
+            score = f"{m['score_a']} - {m['score_b']}" if m["score_a"] is not None else "v"
+            lines.append(f"R{m['round_no']} · {left}  {score}  {right}")
+        return "\n".join(lines)[:1024]
+
     def _match_status_text(self, state, match) -> str:
         if match["status"] == "reported":
             score = f"{match['score_a']}-{match['score_b']}" if match["score_a"] is not None else "final"
@@ -1492,6 +1494,9 @@ class SessionCog(commands.Cog):
                 value=f"**Captain:** {_captain_display(info['captain_id'])}\n{member_lines}",
                 inline=True,
             )
+        results = self._results_text(session_id)
+        if results:
+            embed.add_field(name="Results so far", value=results, inline=False)
         changes = self._recent_changes_text(state, slot["team_ids"])
         if changes:
             embed.add_field(name="Recent changes", value=changes, inline=False)
@@ -1847,125 +1852,13 @@ class SessionCog(commands.Cog):
     async def _post_round(self, guild, session_id, round_no):
         state = self.active_sessions[session_id]
         matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
-        progress_channel = guild.get_channel(state["progress_channel_id"])
         slots = state["slots"]
-
-        embed_index = {}
-        progress_embeds = []
         for n, match in enumerate(matches, start=1):
-            club_a = state["teams"][match["team_a_id"]]["club_name"]
-            club_b = state["teams"][match["team_b_id"]]["club_name"]
-
             # this round's n-th fixture is played in the n-th game category
             slot = slots[min(n, len(slots)) - 1]
             await self._assign_slot(guild, session_id, slot, match, round_no, n, len(matches))
-
-            # one SEPARATE embed per fixture in #in-progress - a distinct
-            # coloured card per matchup is a much clearer split between the
-            # teams than cramming everything into one embed's fields.
-            fixture_embed = discord.Embed(
-                title=f"{club_a}  🆚  {club_b}",
-                description="⏳ In progress",
-                color=discord.Color.orange(),
-            )
-            progress_embeds.append(fixture_embed)
-            embed_index[match["id"]] = n - 1
-
-        # #in-progress keeps the round-by-round scores; rosters and the Watch
-        # buttons now live in each game's public match channel.
-        header_embed = discord.Embed(title=f"📺 Round {round_no} — Now Playing", color=discord.Color.green())
-        all_embeds = [header_embed] + progress_embeds
-        progress_message = await self._send_with_retry(progress_channel.send, embeds=all_embeds)
-
-        state["progress_round_message"] = {
-            "message": progress_message,
-            "embed_index": embed_index,   # match_id -> index INTO fixture embeds (add 1 for real embeds list index)
-            "round_no": round_no,
-        }
         await self._refresh_status(session_id)
 
-    def _round_result_line(self, club_a, score_a, club_b, score_b, a_won, went_to_pens=False):
-        score_text = f"{score_a} - {score_b}" if score_a is not None else "final"
-        pens_tag = " (Pens)" if went_to_pens else ""
-        if a_won:
-            return f"🟩 **{club_a}** 👑  {score_text}{pens_tag}  {club_b} 🟥"
-        return f"🟥 {club_a}  {score_text}{pens_tag}  👑 **{club_b}** 🟩"
-
-    async def _update_progress_field(self, session_id, match_id, club_a, club_b, score_a, score_b, a_won, went_to_pens=False):
-        state = self.active_sessions.get(session_id)
-        pr = state["progress_round_message"] if state else None
-        if not pr or match_id not in pr["embed_index"]:
-            return
-        message = pr["message"]
-        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
-        try:
-            embeds = list(message.embeds)
-            fixture_embed = embeds[idx]
-            fixture_embed.description = self._round_result_line(club_a, score_a, club_b, score_b, a_won, went_to_pens)
-            fixture_embed.colour = discord.Color.green() if a_won else discord.Color.red()
-            embeds[idx] = fixture_embed
-            await message.edit(embeds=embeds)
-        except (discord.HTTPException, IndexError):
-            pass
-
-    async def _mark_progress_field_live(self, session_id, match_id):
-        """Updates a fixture's card in #in-progress from the generic
-        "In progress" placeholder to an explicit LIVE tag, the moment a
-        captain hits Match Live in session-control - lets spectators tell
-        which specific games are actually being played right now versus
-        ones that just haven't started yet."""
-        state = self.active_sessions.get(session_id)
-        pr = state["progress_round_message"] if state else None
-        if not pr or match_id not in pr["embed_index"]:
-            return
-        message = pr["message"]
-        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
-        try:
-            embeds = list(message.embeds)
-            fixture_embed = embeds[idx]
-            fixture_embed.description = "🔴 **LIVE**"
-            embeds[idx] = fixture_embed
-            await message.edit(embeds=embeds)
-        except (discord.HTTPException, IndexError):
-            pass
-
-    async def _mark_progress_field_paused(self, session_id, match_id):
-        """Shows a paused fixture as paused on its #in-progress card."""
-        state = self.active_sessions.get(session_id)
-        pr = state["progress_round_message"] if state else None
-        if not pr or match_id not in pr["embed_index"]:
-            return
-        message = pr["message"]
-        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
-        try:
-            embeds = list(message.embeds)
-            embeds[idx].description = "⏸️ **Paused** — restarting"
-            await message.edit(embeds=embeds)
-        except (discord.HTTPException, IndexError):
-            pass
-
-    async def _update_progress_field_reset(self, session_id, match_id, club_a, club_b):
-        """Resets a fixture's card in #in-progress back to the plain
-        "In progress" placeholder - used after an admin undoes a result, so
-        the card doesn't keep showing the old (wrong) winner/score while
-        the match waits to be re-reported correctly."""
-        state = self.active_sessions.get(session_id)
-        pr = state["progress_round_message"] if state else None
-        if not pr or match_id not in pr["embed_index"]:
-            return
-        message = pr["message"]
-        idx = pr["embed_index"][match_id] + 1  # +1 to skip the header embed
-        try:
-            embeds = list(message.embeds)
-            fixture_embed = embeds[idx]
-            fixture_embed.description = "⏳ In progress"
-            fixture_embed.colour = discord.Color.orange()
-            embeds[idx] = fixture_embed
-            await message.edit(embeds=embeds)
-        except (discord.HTTPException, IndexError):
-            pass
-
-    # -------------------------------------------------------------- results
     async def finalize_match(self, interaction, match_id, winner_team_id, loser_team_id,
                               winner_score, loser_score, origin_view: MatchControlView, origin_message,
                               went_to_pens: bool = False):
@@ -2055,7 +1948,6 @@ class SessionCog(commands.Cog):
         await origin_message.edit(view=origin_view)
 
         guild = interaction.guild
-        await self._update_progress_field(session_id, match_id, club_a, club_b, score_a, score_b, a_won, went_to_pens)
         await self._refresh_status(session_id)
         if not state["is_test"]:
             await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
@@ -2082,13 +1974,6 @@ class SessionCog(commands.Cog):
             return  # round still in progress
 
         if round_no < state["total_rounds"]:
-            # the old round's progress message disappears, a fresh one takes its place
-            pr = state.get("progress_round_message")
-            if pr and pr["message"]:
-                try:
-                    await pr["message"].delete()
-                except discord.HTTPException:
-                    pass
             state["current_round"] += 1
             await self._post_round(guild, session_id, state["current_round"])
         else:
@@ -2173,28 +2058,23 @@ class SessionCog(commands.Cog):
                 f"({goals_for[team_id]}-{goals_against[team_id]}) — Captain <@{captain}>{bonus_note}"
             )
 
-        old_pr = state.get("progress_round_message")
-        if old_pr and old_pr["message"]:
-            try:
-                await old_pr["message"].delete()
-            except discord.HTTPException:
-                pass
-
         title = "🏁 Test Session Complete — Final Standings" if state["is_test"] else "🏁 Session Complete — Final Standings"
         embed = discord.Embed(title=title, description="\n".join(lines), color=discord.Color.gold())
         footer = f"Test session — no MMR/stats were recorded. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds." if state["is_test"] else \
             f"All player MMR is already up to date. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds."
         embed.set_footer(text=footer)
 
-        progress_channel = guild.get_channel(state["progress_channel_id"])
+        # everyone sees the final table in each game's public match channel;
+        # captains get it in their channel too
+        await self._refresh_status(session_id)
         for slot in state["slots"]:
-            captains_channel = guild.get_channel(slot["captains_channel_id"])
-            if captains_channel:
-                try:
-                    await captains_channel.send(embed=embed)
-                except discord.HTTPException:
-                    pass
-        await progress_channel.send(embed=embed)
+            for channel_id in (slot["public_channel_id"], slot["captains_channel_id"]):
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    try:
+                        await channel.send(embed=embed)
+                    except discord.HTTPException:
+                        pass
         if not state["is_test"]:
             await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
@@ -2592,7 +2472,6 @@ class SessionCog(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        progress_channel_id = state["progress_channel_id"]
         guild_id = state["guild_id"]
 
         db.end_session(session_id)
@@ -2605,25 +2484,14 @@ class SessionCog(commands.Cog):
         # as a background task so this method (and whatever button/command
         # called it) can return right away rather than blocking on the wait.
         delay = 0 if natural_completion else config.SESSION_CLOSE_DELAY_SECONDS
-        asyncio.create_task(self._finalize_channel_cleanup(guild_id, progress_channel_id, delay))
+        asyncio.create_task(self._finalize_channel_cleanup(guild_id, delay))
 
-    async def _finalize_channel_cleanup(self, guild_id: int, progress_channel_id: int, delay: int):
+    async def _finalize_channel_cleanup(self, guild_id: int, delay: int):
         if delay:
             await asyncio.sleep(delay)
         guild = self.bot.get_guild(guild_id)
         if not guild:
             return
-
-        progress_channel = guild.get_channel(progress_channel_id)
-        if progress_channel:
-            try:
-                while True:
-                    deleted = await progress_channel.purge(limit=100)
-                    if len(deleted) < 100:
-                        break
-            except discord.HTTPException:
-                pass
-            await progress_channel.send("🚫 No games are currently in progress.")
 
         queue_cog = self.bot.get_cog("QueueCog")
         if queue_cog:
