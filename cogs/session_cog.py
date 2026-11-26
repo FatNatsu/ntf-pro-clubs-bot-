@@ -1588,11 +1588,13 @@ class SessionCog(commands.Cog):
 
         category = guild.get_channel(slot["category_id"])
         if category:
-            for team_id in (team_a_id, team_b_id):
+            # position is set every time so the two rooms always sit in the
+            # same order as the title ("A vs B": A's room first, then B's)
+            for order, team_id in enumerate((team_a_id, team_b_id)):
                 voice_channel = guild.get_channel(state["teams"][team_id]["voice_channel_id"])
-                if voice_channel and getattr(voice_channel, "category_id", None) != category.id:
+                if voice_channel:
                     try:
-                        await voice_channel.edit(category=category)
+                        await voice_channel.edit(category=category, position=order)
                     except discord.HTTPException:
                         pass
         self._schedule_rename(
@@ -1649,14 +1651,13 @@ class SessionCog(commands.Cog):
         )
 
     # ------------------------------------------------------ admin log panel
-    def _build_admin_status_embed(self, session_id, ended: bool = False):
+    def _build_admin_status_embed(self, session_id):
         state = self.active_sessions[session_id]
         round_no = state["current_round"]
         matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
-        title = f"Session #{session_id} — {state['mode'].title()} — Round {round_no}/{state['total_rounds']}"
         embed = discord.Embed(
-            title=title + (" — ended" if ended else ""),
-            color=discord.Color.dark_grey() if ended else ui.accent("neutral"),
+            title=f"Session #{session_id} — {state['mode'].title()} — Round {round_no}/{state['total_rounds']}",
+            color=ui.accent("neutral"),
         )
         for n, match in enumerate(matches, start=1):
             info_a = state["teams"][match["team_a_id"]]
@@ -1669,8 +1670,24 @@ class SessionCog(commands.Cog):
                 ),
                 inline=False,
             )
-        if not ended:
-            embed.set_footer(text="Updates by itself. Everything that happens is logged below.")
+        embed.set_footer(text="Updates by itself. Everything that happens is logged below.")
+        return embed
+
+    def _build_admin_ended_embed(self, session_id, ended_by=None, natural_completion: bool = False):
+        """What the live status message turns into once the session is over:
+        a short record, with no live games left on it."""
+        state = self.active_sessions[session_id]
+        if natural_completion:
+            how = "Finished — all rounds played."
+        else:
+            who = ended_by.mention if ended_by else "the system"
+            how = f"Ended early by {who} in round {state['current_round']}/{state['total_rounds']}."
+        embed = discord.Embed(
+            title=f"Session #{session_id} — {state['mode'].title()} — ended",
+            description=how,
+            color=discord.Color.dark_grey(),
+        )
+        embed.add_field(name="Results", value=self._results_text(session_id) or "No games were finished.", inline=False)
         return embed
 
     async def _post_admin_panel(self, guild, session_id):
@@ -2497,7 +2514,14 @@ class SessionCog(commands.Cog):
         status_message = state.get("admin_status_message")
         if status_message:
             try:
-                await status_message.edit(**ui.edit_kwargs("admin", self._build_admin_status_embed(session_id, ended=True)))
+                # banner comes off too, so an old session doesn't look like a live one
+                await status_message.edit(
+                    embeds=[self._build_admin_ended_embed(session_id, ended_by, natural_completion)],
+                    attachments=[],
+                )
+            except discord.HTTPException:
+                pass
+            try:
                 await status_message.unpin()
             except discord.HTTPException:
                 pass

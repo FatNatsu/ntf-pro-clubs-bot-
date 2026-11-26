@@ -512,7 +512,11 @@ class AdminCog(commands.Cog):
             f"yourself. Fake players will show as broken mentions — that's expected.",
             ephemeral=True,
         )
-        session_id = await session_cog.start_session(guild, mode, players, interaction.channel_id, is_test=True)
+        # test sessions announce in the admin log when there is one, so
+        # "started"/"ended" messages don't land in whatever chat the command was typed in
+        admin_log_id = (db.get_guild_config(guild.id) or {}).get("admin_log_channel_id")
+        announce_id = admin_log_id if admin_log_id and guild.get_channel(admin_log_id) else interaction.channel_id
+        session_id = await session_cog.start_session(guild, mode, players, announce_id, is_test=True)
 
         state = session_cog.active_sessions.get(session_id)
         if state and start_on_bench:
