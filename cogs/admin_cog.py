@@ -89,7 +89,7 @@ class AdminCog(commands.Cog):
     girl_group = app_commands.Group(name="girl", description="Manage this server's girl whitelist - keeps them together on the same team")
 
     # ------------------------------------------------------------- one-time setup
-    @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent NTF channels (queue, leaderboard, history, admin log, season archive)")
+    @app_commands.command(name="ntf_setup", description="[Admin] Create this server's permanent NTF channels and post the queue panel")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def ntf_setup(self, interaction: discord.Interaction):
         guild = interaction.guild
