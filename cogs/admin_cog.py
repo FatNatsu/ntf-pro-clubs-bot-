@@ -350,35 +350,6 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="hidden_mmr", description="[Admin] Privately view hidden MMR - one player, or the top 25 in a mode")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def hidden_mmr(self, interaction: discord.Interaction, mode: Literal["rivals", "league"], member: discord.Member = None):
-        def line(row):
-            last = f"{row['last_season_mmr']}" if row.get("last_season_mmr") is not None else "—"
-            return f"<@{row['discord_id']}> · hidden **{row['hidden_mmr']}** · last season {last} · this season {row['mmr']}"
-
-        if member:
-            db.ensure_player(interaction.guild_id, member.id, member.display_name)
-            stats = db.get_player_mode_stats(interaction.guild_id, member.id, mode)
-            stats["hidden_mmr"] = db.balance_rating(interaction.guild_id, member.id, mode)
-            body = line(stats)
-        else:
-            rows = db.hidden_leaderboard(interaction.guild_id, mode)
-            body = "\n".join(f"`{i:>2}.` {line(r)}" for i, r in enumerate(rows, start=1)) or "No players tracked yet."
-        embed = discord.Embed(title=f"🔒 Hidden MMR — {mode.title()}", description=body[:4000], color=ui.accent("neutral"))
-        embed.set_footer(text="Only you can see this. Hidden MMR is used to build fair teams and never resets.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="hidden_mmr_set", description="[Admin] Set a player's hidden MMR in one mode (their visible MMR is not changed)")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def hidden_mmr_set(self, interaction: discord.Interaction, member: discord.Member, mode: Literal["rivals", "league"], value: int):
-        db.ensure_player(interaction.guild_id, member.id, member.display_name)
-        db.set_hidden_mmr(interaction.guild_id, member.id, mode, value)
-        await interaction.response.send_message(
-            f"🔒 {member.mention}'s hidden **{mode}** MMR is now **{max(0, value)}**. Their visible MMR and record are unchanged.",
-            ephemeral=True,
-        )
-
     @app_commands.command(name="register_everyone", description="[Admin] Add every current server member to the leaderboard at the starting MMR")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def register_everyone(self, interaction: discord.Interaction):

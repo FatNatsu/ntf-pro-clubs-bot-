@@ -272,17 +272,3 @@ process without interfering with each other.
 - **Golden Crown:** at each reset, the player with the most wins in each
   mode (ties: fewer losses, then higher MMR) is named in the season archive
   and carries a 👑 on the leaderboard and in `/rank` for the next season.
-
-## Hidden MMR (admins only)
-
-Every player has a second rating per mode that seasons never reset. It moves
-by the same amount as the visible MMR after every result, and it is what
-teams and sub picks are balanced on, so a new season where everyone shows the
-starting MMR still gets even teams. It never appears on the leaderboard, in
-`/rank` or in match posts.
-
-- `/hidden_mmr mode:<mode> [member]` — private view: hidden MMR, where the
-  player finished last season, and this season's MMR. Without a member it
-  lists the top 25.
-- `/hidden_mmr_set member mode value` — set it by hand, for example from an
-  old season's leaderboard. Visible MMR and records are not changed.
