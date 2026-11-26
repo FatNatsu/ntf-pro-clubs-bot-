@@ -1,6 +1,6 @@
 """
 All the guild-channel plumbing: creating the session category, the locked
-team voice channels, the bench, the captains-only control room, and the
+team voice channels, the bench, each game's public and captains-only channels, and the
 public in-progress text channel - plus moving members around.
 
 Split out from the cogs so the Discord-API-shaped code is in one place.
@@ -10,10 +10,10 @@ import discord
 import config
 
 
-async def create_session_category(guild: discord.Guild, session_id: int, mode: str):
-    name = f"{config.SESSION_CATEGORY_PREFIX} #{session_id} ({mode.upper()})"
-    category = await guild.create_category(name=name)
-    return category
+async def create_named_category(guild: discord.Guild, name: str):
+    """A session uses several categories (one for the Bench, one per game) -
+    see the layout note in config.py."""
+    return await guild.create_category(name=name[:100])
 
 
 async def create_team_voice_channel(guild, category, club_name, member_ids, captain_ids, user_limit, channel_name=None):
@@ -65,24 +65,25 @@ async def create_bench_channel(guild, category, captain_ids):
     return channel
 
 
-async def create_control_channel(guild, category, captain_ids):
-    """Text channel only captains (and the bot) can see or post in - this is
-    where match panels, sub requests, and the end-session button live."""
+async def create_read_only_text_channel(guild, category, name):
+    """Everyone can see it, only the bot can post - used for a game's public
+    match channel (rosters + Watch buttons) and the public sub queue."""
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    return await guild.create_text_channel(name=name, category=category, overwrites=overwrites)
+
+
+async def create_private_text_channel(guild, category, name):
+    """Hidden from everyone but the bot (and admins, who see every channel).
+    Used for a game's captains channel - the two captains playing that game
+    are let in round by round (see SessionCog._sync_captains_access)."""
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
-    for uid in captain_ids:
-        member = guild.get_member(uid)
-        if member:
-            overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-
-    channel = await guild.create_text_channel(
-        name=config.SESSION_CONTROL_CHANNEL_NAME,
-        category=category,
-        overwrites=overwrites,
-    )
-    return channel
+    return await guild.create_text_channel(name=name, category=category, overwrites=overwrites)
 
 
 async def create_progress_text_channel(guild, category=None):

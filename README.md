@@ -72,36 +72,57 @@ can post this panel; any player can then ready up from it.
    also close either queue on demand any time with **`/close_queue
    mode:<rivals|league>`** — a quick, low-friction way to keep the channel
    tidy.
-5. At pop time, the bot creates a category `NTF SESSION #<id> (MODE)`
-   containing: one voice channel per team, named after a randomly assigned
-   club and limited to the mode's team cap (7 in League, 11 in Rivals), 🪑 **Bench**, and 🎛️ **session-control**
-   (visible only to that session's captains). If it was a force start with
-   fewer than the full number of players, the missing head-count is added
-   on top of Bench's normal capacity — e.g. a 16-player League force start
-   opens Bench up to 12 (8 missing + 4 normal), leaving room for stragglers
-   and rotation.
+5. At pop time, the bot lays the session out as one small category for the
+   Bench and then **one category per game** being played at the same time
+   (League has two games a round, Rivals one):
+
+   ```
+   PRO CLUBS SESSION #12 · BENCH (LEAGUE)
+       📋 sub-queue            everyone: whose turn it is, who's waiting
+       🪑 Bench                voice, no player cap
+   PRO CLUBS SESSION #12 · MATCH 1 · Dhafar vs NTF
+       📋 match-1              everyone, read-only: both rosters + Watch buttons
+       🎛️ match-1-captains     only that game's two captains (and admins)
+       Dhafar                  voice, limited to the mode's team cap
+       NTF                     voice
+   PRO CLUBS SESSION #12 · MATCH 2 · ...
+   ```
+
+   Each game's two captains get their own channel and panel, separate from
+   the other game. In League the opponents change every round, so at the
+   start of each round the bot moves every team's voice channel under the
+   game it's now playing in and lets the right two captains into each
+   captains channel. (Discord always lists a category's text channels above
+   its voice channels, which is why each game has its own category.)
 6. Captains are auto-picked from your whitelist (fills in with the
    highest-MMR remaining players if you don't have enough whitelisted
    captains queued). Everyone else is snake-drafted by MMR so total team
    strength is as even as possible, and players are dragged straight into
    their team's VC. **Discord can only move people already in some voice
    channel** — get players into voice before the queue pops.
-7. In session-control, each round starts with a **`━━━ ROUND N ━━━`**
-   divider, then one clearly separated panel per fixture (its own embed +
-   two big red buttons) so captains always know which match they're tapping
-   into. Tapping a side pops up a scoreline prompt, then locks the result in
-   — winner turns 👑 green, both buttons disable.
-8. **#in-progress** mirrors every round as a set of **separate cards, one
-   per matchup** (not crammed into one block) — clean visual separation
-   between all the teams playing that round. Once a result lands, that
-   card turns 🟩 green with a 👑 crown on the winner and 🟥 red on the
-   loser. When the next round starts, the whole card set is replaced with
-   a fresh one. **👀 Watch \<Club\>** buttons let anyone already in a voice
-   channel spectate (auto-muted).
-9. A team's captain (or an admin) can hit **🔁 Add sub** in
-   session-control — it pulls a player from Bench straight onto the team
-   (longest-waiting players first, best MMR fit among them; no swap, no
-   picking who comes off).
+7. In each game's **captains channel**, a round starts with a
+   **`━━━ ROUND N ━━━`** divider, then that fixture's panel: **▶️ Match
+   Live** at kick-off, then two big red buttons to report the winner.
+   Tapping a side pops up a scoreline prompt, then locks the result in —
+   winner turns 👑 green, both buttons disable. Underneath sits the
+   **captain panel** for roster changes, and a copy of the live Sub Queue.
+8. Each game's **public match channel** shows both teams, their captains
+   and players, whether the game is waiting, live or finished, and
+   **👀 Watch \<Club\>** buttons that let anyone already in a voice channel
+   spectate (auto-muted). **#in-progress** keeps the round-by-round score
+   cards (🟩 winner 👑 / 🟥 loser) and the final standings.
+9. The **captain panel** acts on the team of whoever presses it:
+   - **🔁 Add sub** pulls a player from Bench straight onto your team
+     (longest-waiting players first, best MMR fit among them). The turn
+     order runs across the whole session: the team with the fewest players
+     goes next, whichever game it's in.
+   - **🔄 Transfer Player** moves one of **your own** players onto any other
+     team with room, including a team in the other game.
+   - **❌ Remove Player** takes one of **your own** players off the roster.
+   - A captain can never transfer or remove another team's player; admins
+     can, from the admin panel (below).
+   - In League a transfer only fills a team to 6 — the 7th seat only ever
+     comes through **➕ Request 7th player**.
    - **League:** Add sub only fills a team up to **6**. A team at 6 can take
      one more, to a hard maximum of **7**, only if its captain (or an admin)
      presses **➕ Request 7th player** — and only once no other team is
@@ -124,14 +145,23 @@ can post this panel; any player can then ready up from it.
     so wins/losses matter less individually near the top and the ladder
     stays stable. By the time the last match is in, every player's MMR for
     the session is already settled. S rank starts at 2500 MMR.
-11. When the final round completes, **#in-progress** and session-control
-    both post the session summary — every team's win/loss record, ranked
-    🥇🥈🥉 down to last place. That stays up for **60 seconds**, then the
-    entire session category (all team VCs, Bench, session-control) is torn
+11. **Admins** run the session from the **admin log** channel. When a
+    session starts the bot posts there: a pinned **live status** message
+    (each game in the current round: waiting / LIVE / finished with the
+    score) and an **admin panel** — Pull Sub For Team, Transfer Player,
+    Remove Player, Reassign Captain and **🛑 End Session**. Every action
+    during the session (subs, transfers, removals, captain changes, matches
+    going live, results, undos) is logged underneath, as before. Ending the
+    session is admin-only; captains no longer have that button. If a server
+    has no admin log set up, admins still have `/force_end_session` and
+    `/admin_end_all_sessions`.
+12. When the final round completes, **#in-progress** and each captains
+    channel post the session summary — every team's win/loss record, ranked
+    🥇🥈🥉 down to last place. That stays up for **60 seconds**, then every
+    session category (Bench, each game's channels and team VCs) is torn
     down automatically and #in-progress posts **"No games are currently in
-    progress."** A captain or admin can also end early any time with
-    **🛑 End Session** (with a confirm step) — or admins can use
-    `/force_end_session` / `/admin_end_all_sessions`, no captain required.
+    progress."** The admin panel is removed; the final status stays in the
+    admin log as part of the record.
 
 ## 5. Stats & leaderboard, anywhere, anytime
 

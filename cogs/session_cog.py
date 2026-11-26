@@ -120,7 +120,7 @@ class PenaltyPickView(discord.ui.View):
 
 
 class MatchControlView(discord.ui.View):
-    """Red win buttons for one match, in session-control. Flips the winner
+    """Red win buttons for one match, in that game's captains channel. Flips the winner
     green + disables both once a captain/admin reports it. Each match is its
     own message so the 2 (rivals) or up-to-2-concurrent (league) fixtures
     stay visually separate and easy to tap on a console controller."""
@@ -177,6 +177,7 @@ class MatchControlView(discord.ui.View):
             state = self.cog.active_sessions.get(self.session_id)
             if state:
                 await self.cog._update_progress_field_reset(self.session_id, self.match_id, self.team_a_club, self.team_b_club)
+                await self.cog._refresh_status(self.session_id)
                 await self.cog._log_action(
                     self.session_id,
                     f"↩️ <@{interaction.user.id}> undid the result for **{self.team_a_club}** vs **{self.team_b_club}** "
@@ -213,6 +214,7 @@ class MatchControlView(discord.ui.View):
             self.btn_live.label = "Rosters Locked"
             await interaction.response.edit_message(view=self)
             await self.cog._mark_progress_field_live(self.session_id, self.match_id)
+            await self.cog._refresh_status(self.session_id)
             await self.cog._log_action(
                 self.session_id,
                 f"▶️ <@{interaction.user.id}> marked **{self.team_a_club}** vs **{self.team_b_club}** as LIVE.",
@@ -266,6 +268,7 @@ class TransferDestinationView(discord.ui.View):
         options = [
             discord.SelectOption(label=info["club_name"], value=str(team_id))
             for team_id, info in state["teams"].items()
+            if player_id not in info["on_field"]
         ]
         select = discord.ui.Select(placeholder=f"Move {player_label} to which team?", options=options[:25])
         select.callback = self._on_select
@@ -277,6 +280,11 @@ class TransferDestinationView(discord.ui.View):
         state = self.cog.active_sessions.get(self.session_id)
         if not state:
             await interaction.followup.send("This session has ended.", ephemeral=True)
+            return
+        if not self.cog.can_manage_player(interaction, state, self.player_id):
+            await interaction.followup.send(
+                "You can only transfer players from the team you captain.", ephemeral=True
+            )
             return
         added, moved, reason = await self.cog.transfer_player(interaction.guild, self.session_id, state, self.player_id, dest_team_id)
         club_name = state["teams"][dest_team_id]["club_name"]
@@ -379,7 +387,7 @@ class RemovePlayerSelectView(discord.ui.View):
     up their team's sub slot for someone else, for when a player leaves the
     session mid-way and there's no one to swap them for."""
 
-    def __init__(self, cog: "SessionCog", session_id):
+    def __init__(self, cog: "SessionCog", session_id, only_team_id=None):
         super().__init__(timeout=60)
         self.cog = cog
         self.session_id = session_id
@@ -387,6 +395,8 @@ class RemovePlayerSelectView(discord.ui.View):
 
         options = []
         for team_id, info in state["teams"].items():
+            if only_team_id is not None and team_id != only_team_id:
+                continue
             for pid in info["on_field"]:
                 member = cog.bot.get_user(pid)
                 label = member.display_name if member else str(pid)
@@ -405,6 +415,11 @@ class RemovePlayerSelectView(discord.ui.View):
         if not state:
             await interaction.followup.send("This session has ended.", ephemeral=True)
             return
+        if not self.cog.can_manage_player(interaction, state, player_id):
+            await interaction.followup.send(
+                "You can only remove players from the team you captain.", ephemeral=True
+            )
+            return
         club_name = state["teams"][team_id]["club_name"]
         await self.cog.remove_player_from_roster(interaction.guild, self.session_id, team_id, player_id)
         await interaction.followup.send(f"❌ Removed <@{player_id}> from **{club_name}**'s roster. That slot is now free.", ephemeral=True)
@@ -419,7 +434,7 @@ class TransferPlayerSelectView(discord.ui.View):
     player to move. Only lists players actively on a team, not fake/test
     accounts or people the bot can't resolve to a real member."""
 
-    def __init__(self, cog: "SessionCog", session_id):
+    def __init__(self, cog: "SessionCog", session_id, only_team_id=None):
         super().__init__(timeout=60)
         self.cog = cog
         self.session_id = session_id
@@ -427,6 +442,8 @@ class TransferPlayerSelectView(discord.ui.View):
 
         options = []
         for team_id, info in state["teams"].items():
+            if only_team_id is not None and team_id != only_team_id:
+                continue
             for pid in info["on_field"]:
                 member = cog.bot.get_user(pid)
                 label = member.display_name if member else str(pid)
@@ -448,166 +465,166 @@ class TransferPlayerSelectView(discord.ui.View):
         )
 
 
-class SessionControlPanelView(discord.ui.View):
-    """Persistent-for-the-session sub + end controls, in session-control."""
+class CaptainPanelView(discord.ui.View):
+    """The roster controls for ONE game, posted in that game's captains-only
+    channel - so the two captains playing each other have their own panel,
+    separate from the other game going on at the same time.
 
-    def __init__(self, cog: "SessionCog", session_id, teams, mode):
+    Every button acts on the team the person pressing it captains:
+    - Add sub: pulls the next player from the Bench (the session-wide turn
+      order still decides whose turn it is).
+    - Request Nth player: League only - the last-resort seat above the
+      normal team size.
+    - Transfer Player: move one of YOUR OWN players onto any other team,
+      including a team in the other game.
+    - Remove Player: take one of YOUR OWN players off the roster.
+    Admins who aren't captaining use the admin panel in the admin log."""
+
+    def __init__(self, cog: "SessionCog", session_id, mode):
         super().__init__(timeout=None)
         self.cog = cog
         self.session_id = session_id
         self.mode = mode
 
-        # ONE button for the common case - it always represents whichever team is
-        # currently up (see sync_sub_buttons), rather than one button per team.
         self.sub_button = discord.ui.Button(label="Add sub", style=discord.ButtonStyle.success, emoji="🔁")
-        self.sub_button.callback = self._make_sub_callback()
+        self.sub_button.callback = self._sub_callback
         self.add_item(self.sub_button)
 
-        # Modes whose cap is above their normal size (League: 6, then a 7th)
-        # get a separate button for that last-resort seat - it is never filled
-        # by the button above, a captain (or admin) has to ask for it here.
-        # Rivals fills straight to its cap with Add sub, so it has no such button.
         if config.team_cap(mode) > config.normal_team_size(mode):
-            seventh_btn = discord.ui.Button(
+            extra_btn = discord.ui.Button(
                 label=f"Request {_ordinal(config.team_cap(mode))} player", style=discord.ButtonStyle.secondary, emoji="➕"
             )
-            seventh_btn.callback = self._seventh_callback
-            self.add_item(seventh_btn)
-
-        # Admins keep a way to pull for a DIFFERENT team than whoever's turn it
-        # is (an away captain, etc.) - the single button above always acts on
-        # the current turn, so this is the only way to override it now.
-        admin_sub_btn = discord.ui.Button(label="Admin: Pull For Team", style=discord.ButtonStyle.secondary, emoji="🛠️")
-        admin_sub_btn.callback = self._admin_sub_callback
-        self.add_item(admin_sub_btn)
+            extra_btn.callback = self._extra_callback
+            self.add_item(extra_btn)
 
         transfer_btn = discord.ui.Button(label="Transfer Player", style=discord.ButtonStyle.primary, emoji="🔄")
         transfer_btn.callback = self._transfer_callback
         self.add_item(transfer_btn)
 
-        reassign_btn = discord.ui.Button(label="Reassign Captain", style=discord.ButtonStyle.primary, emoji="🎖️")
-        reassign_btn.callback = self._reassign_captain_callback
-        self.add_item(reassign_btn)
-
         remove_btn = discord.ui.Button(label="Remove Player", style=discord.ButtonStyle.danger, emoji="❌")
-        remove_btn.callback = self._remove_player_callback
+        remove_btn.callback = self._remove_callback
         self.add_item(remove_btn)
 
-        end_btn = discord.ui.Button(label="End Session", style=discord.ButtonStyle.danger, emoji="🛑")
-        end_btn.callback = self._end_callback
-        self.add_item(end_btn)
-
     def sync_sub_buttons(self, teams, turn_team_id=None):
-        """Keeps the single Add sub button in step with whoever's turn it is:
-        - nobody eligible (all full, or no captain): greyed out, "No sub available".
-        - otherwise: green, labelled with the on-turn team - clicking it always
-          acts on THAT team, resolved fresh at click time (see the callback), so
-          it can never go stale between being shown and being pressed.
-        The button doesn't hold a team_id itself for this reason - it's always a
-        live "whoever's up" pointer, not a fixed target."""
+        """Shows whose turn it is on the Add sub button (the turn order runs
+        across the whole session, both games). Greyed out when no team can
+        take a sub."""
         if turn_team_id is None:
             self.sub_button.disabled = True
             self.sub_button.label = "No sub available"
             self.sub_button.style = discord.ButtonStyle.secondary
         else:
-            info = teams[turn_team_id]
             self.sub_button.disabled = False
-            self.sub_button.label = f"Add sub — {info['club_name'][:60]}"
+            self.sub_button.label = f"Add sub (next: {teams[turn_team_id]['club_name']})"[:80]
             self.sub_button.style = discord.ButtonStyle.success
 
-    def _make_sub_callback(self):
-        async def callback(interaction: discord.Interaction):
-            state = self.cog.active_sessions.get(self.session_id)
-            if not state:
-                await interaction.response.send_message("This session has ended.", ephemeral=True)
-                return
-            team_id = self.cog._sub_turn_team(state)
-            if team_id is None:
-                await interaction.response.send_message(
-                    f"No team can take a sub right now (all at {_normal(state)}, or no captain)."
-                    + (f" A captain can still use Request {_ordinal(_cap(state))} player." if _cap(state) > _normal(state) else ""),
-                    ephemeral=True
-                )
-                return
-            await self.cog.request_sub(interaction, self.session_id, team_id, state["teams"][team_id]["club_name"])
-        return callback
-
-    async def _seventh_callback(self, interaction: discord.Interaction):
-        """Captain: asks for the extra player for their OWN team. Admin who
-        isn't a captain in this session: picks which team gets one."""
+    async def _own_team(self, interaction: discord.Interaction, action: str):
+        """Returns (state, team_id) for the team the presser captains, or
+        (None, None) after telling them why they can't."""
         state = self.cog.active_sessions.get(self.session_id)
         if not state:
             await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return None, None
+        team_id = self.cog.captained_team(state, interaction.user.id)
+        if team_id is None:
+            if interaction.user.guild_permissions.manage_guild:
+                msg = f"You aren't captaining a team — use the admin controls in the admin log to {action}."
+            else:
+                msg = f"Only a team's captain can {action}."
+            await interaction.response.send_message(msg, ephemeral=True)
+            return None, None
+        return state, team_id
+
+    async def _sub_callback(self, interaction: discord.Interaction):
+        state, team_id = await self._own_team(interaction, "request a sub")
+        if team_id is None:
             return
-        own_team_id = next(
-            (team_id for team_id, info in state["teams"].items() if info["captain_id"] == interaction.user.id), None
+        await self.cog.request_sub(interaction, self.session_id, team_id, state["teams"][team_id]["club_name"])
+
+    async def _extra_callback(self, interaction: discord.Interaction):
+        state, team_id = await self._own_team(interaction, "request an extra player")
+        if team_id is None:
+            return
+        await self.cog.request_sub(
+            interaction, self.session_id, team_id, state["teams"][team_id]["club_name"], extra=True
         )
-        if own_team_id is not None:
-            await self.cog.request_sub(
-                interaction, self.session_id, own_team_id, state["teams"][own_team_id]["club_name"], extra=True
-            )
+
+    async def _transfer_callback(self, interaction: discord.Interaction):
+        state, team_id = await self._own_team(interaction, "transfer a player")
+        if team_id is None:
             return
+        view = TransferPlayerSelectView(self.cog, self.session_id, only_team_id=team_id)
+        if not view.children:
+            await interaction.response.send_message("Nobody is on your team to transfer.", ephemeral=True)
+            return
+        await interaction.response.send_message("Which of your players do you want to transfer?", view=view, ephemeral=True)
+
+    async def _remove_callback(self, interaction: discord.Interaction):
+        state, team_id = await self._own_team(interaction, "remove a player")
+        if team_id is None:
+            return
+        view = RemovePlayerSelectView(self.cog, self.session_id, only_team_id=team_id)
+        if not view.children:
+            await interaction.response.send_message("Nobody is on your team to remove.", ephemeral=True)
+            return
+        await interaction.response.send_message("Remove which of your players from the team?", view=view, ephemeral=True)
+
+
+class AdminPanelView(discord.ui.View):
+    """Admin-only controls for one session, posted in the admin log when the
+    session starts and removed when it ends. Everything here works on ANY
+    team, and ending the session lives only here (captains can't end it)."""
+
+    def __init__(self, cog: "SessionCog", session_id):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.session_id = session_id
+        for label, style, emoji, callback in [
+            ("Pull Sub For Team", discord.ButtonStyle.secondary, "🛠️", self._pull_callback),
+            ("Transfer Player", discord.ButtonStyle.primary, "🔄", self._transfer_callback),
+            ("Remove Player", discord.ButtonStyle.danger, "❌", self._remove_callback),
+            ("Reassign Captain", discord.ButtonStyle.primary, "🎖️", self._reassign_callback),
+            ("End Session", discord.ButtonStyle.danger, "🛑", self._end_callback),
+        ]:
+            btn = discord.ui.Button(label=label, style=style, emoji=emoji)
+            btn.callback = callback
+            self.add_item(btn)
+
+    async def _state(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message(
-                f"Only a team's captain (or an admin) can request a {_ordinal(_cap(state))} player.",
-                ephemeral=True,
-            )
-            return
-        options = [
-            discord.SelectOption(label=info["club_name"], value=str(team_id))
-            for team_id, info in state["teams"].items()
-            if _normal(state) <= len(info["on_field"]) < _cap(state)
-        ]
-        if not options:
-            await interaction.response.send_message(
-                f"No team is sitting at {_normal(state)} right now, so nobody can take a "
-                f"{_ordinal(_cap(state))} player.",
-                ephemeral=True,
-            )
-            return
-        view = discord.ui.View(timeout=60)
-        select = discord.ui.Select(placeholder=f"{_ordinal(_cap(state))} player for which team?", options=options)
-
-        async def on_select(select_interaction: discord.Interaction):
-            team_id = int(select.values[0])
-            await self.cog.request_sub(
-                select_interaction, self.session_id, team_id, state["teams"][team_id]["club_name"], extra=True
-            )
-
-        select.callback = on_select
-        view.add_item(select)
-        await interaction.response.send_message("Pick the team:", view=view, ephemeral=True)
-
-    async def _admin_sub_callback(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message(
-                "Only an admin can pull a sub for a specific team out of turn — "
-                "use the green Add sub button above for the team that's actually up.",
-                ephemeral=True,
-            )
-            return
+            await interaction.response.send_message("Only an admin can use these controls.", ephemeral=True)
+            return None
         state = self.cog.active_sessions.get(self.session_id)
         if not state:
             await interaction.response.send_message("This session has ended.", ephemeral=True)
+        return state
+
+    async def _pull_callback(self, interaction: discord.Interaction):
+        state = await self._state(interaction)
+        if not state:
             return
         options = [
-            discord.SelectOption(label=info["club_name"], value=str(team_id))
-            for team_id, info in state["teams"].items() if len(info["on_field"]) < _normal(state)
+            discord.SelectOption(
+                label=f"{info['club_name']} ({len(info['on_field'])})", value=str(team_id)
+            )
+            for team_id, info in state["teams"].items() if len(info["on_field"]) < _cap(state)
         ]
         if not options:
-            await interaction.response.send_message(
-                f"Every team already has {_normal(state)}."
-                + (f" Use Request {_ordinal(_cap(state))} player if a team needs one more." if _cap(state) > _normal(state) else ""),
-                ephemeral=True,
-            )
+            await interaction.response.send_message("Every team is already at its cap.", ephemeral=True)
             return
         view = discord.ui.View(timeout=60)
         select = discord.ui.Select(placeholder="Pull a sub for which team?", options=options)
 
         async def on_select(select_interaction: discord.Interaction):
             team_id = int(select.values[0])
+            current = self.cog.active_sessions.get(self.session_id)
+            if not current:
+                await select_interaction.response.send_message("This session has ended.", ephemeral=True)
+                return
+            # a team already at its normal size is asking for the last-resort seat
+            extra = len(current["teams"][team_id]["on_field"]) >= _normal(current)
             await self.cog.request_sub(
-                select_interaction, self.session_id, team_id, state["teams"][team_id]["club_name"]
+                select_interaction, self.session_id, team_id, current["teams"][team_id]["club_name"], extra=extra
             )
 
         select.callback = on_select
@@ -615,16 +632,8 @@ class SessionControlPanelView(discord.ui.View):
         await interaction.response.send_message("Pick the team to pull a sub for:", view=view, ephemeral=True)
 
     async def _transfer_callback(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message(
-                "Only an admin can manually transfer a player between teams — a captain can still use "
-                "Add Sub for their own team.",
-                ephemeral=True,
-            )
-            return
-        state = self.cog.active_sessions.get(self.session_id)
+        state = await self._state(interaction)
         if not state:
-            await interaction.response.send_message("This session has ended.", ephemeral=True)
             return
         view = TransferPlayerSelectView(self.cog, self.session_id)
         if not view.children:
@@ -632,30 +641,9 @@ class SessionControlPanelView(discord.ui.View):
             return
         await interaction.response.send_message("Who do you want to transfer?", view=view, ephemeral=True)
 
-    async def _reassign_captain_callback(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message(
-                "Only an admin can reassign a team's captain.",
-                ephemeral=True,
-            )
-            return
-        state = self.cog.active_sessions.get(self.session_id)
+    async def _remove_callback(self, interaction: discord.Interaction):
+        state = await self._state(interaction)
         if not state:
-            await interaction.response.send_message("This session has ended.", ephemeral=True)
-            return
-        view = ReassignCaptainTeamSelectView(self.cog, self.session_id)
-        await interaction.response.send_message("Which team needs a new captain?", view=view, ephemeral=True)
-
-    async def _remove_player_callback(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message(
-                "Only an admin can remove a player from their team's roster entirely.",
-                ephemeral=True,
-            )
-            return
-        state = self.cog.active_sessions.get(self.session_id)
-        if not state:
-            await interaction.response.send_message("This session has ended.", ephemeral=True)
             return
         view = RemovePlayerSelectView(self.cog, self.session_id)
         if not view.children:
@@ -663,17 +651,20 @@ class SessionControlPanelView(discord.ui.View):
             return
         await interaction.response.send_message("Remove who from their team entirely?", view=view, ephemeral=True)
 
-    async def _end_callback(self, interaction: discord.Interaction):
-        state = self.cog.active_sessions.get(self.session_id)
+    async def _reassign_callback(self, interaction: discord.Interaction):
+        state = await self._state(interaction)
         if not state:
-            await interaction.response.send_message("This session has already ended.", ephemeral=True)
             return
-        is_captain = interaction.user.id in {t["captain_id"] for t in state["teams"].values()}
-        is_admin = interaction.user.guild_permissions.manage_guild
-        if not (is_captain or is_admin):
-            await interaction.response.send_message("Only a captain or a server admin can end the session.", ephemeral=True)
+        view = ReassignCaptainTeamSelectView(self.cog, self.session_id)
+        await interaction.response.send_message("Which team needs a new captain?", view=view, ephemeral=True)
+
+    async def _end_callback(self, interaction: discord.Interaction):
+        state = await self._state(interaction)
+        if not state:
             return
-        await interaction.response.send_message("End this session for everyone?", view=ConfirmEndView(self.cog, self.session_id), ephemeral=True)
+        await interaction.response.send_message(
+            "End this session for everyone?", view=ConfirmEndView(self.cog, self.session_id), ephemeral=True
+        )
 
 
 class ConfirmEndView(discord.ui.View):
@@ -693,7 +684,7 @@ class ConfirmEndView(discord.ui.View):
 
 
 class SpectateView(discord.ui.View):
-    """Attached to the round's progress message - one button per team."""
+    """Attached to a game's public match channel - one Watch button per team in that game."""
 
     def __init__(self, cog: "SessionCog", session_id, team_ids_and_clubs):
         super().__init__(timeout=None)
@@ -1015,17 +1006,24 @@ class SessionCog(commands.Cog):
         return embed
 
     async def _refresh_sub_queue(self, session_id):
+        """The live Sub Queue is shown in the public sub-queue channel and in
+        each game's captains channel - keep every copy the same."""
         state = self.active_sessions.get(session_id)
-        message = state.get("sub_queue_message") if state else None
-        if not message:
+        if not state:
             return
         guild = self.bot.get_guild(state["guild_id"])
         if not guild:
             return
-        try:
-            await message.edit(embed=self._build_sub_queue_embed(state, guild))
-        except discord.HTTPException:
-            pass
+        messages = list(state.get("sub_queue_messages", []))
+        messages += [slot["sub_queue_message"] for slot in state["slots"] if slot.get("sub_queue_message")]
+        if not messages:
+            return
+        embed = self._build_sub_queue_embed(state, guild)
+        for message in messages:
+            try:
+                await message.edit(embed=embed)
+            except discord.HTTPException:
+                pass
 
     def _schedule_sub_queue_refresh(self, session_id):
         """Refreshes the Sub Queue message shortly from now, batching a burst
@@ -1139,7 +1137,19 @@ class SessionCog(commands.Cog):
         captain_ids = [t["captain"]["discord_id"] for t in built]
 
         session_id = db.create_session(guild.id, mode)
-        category = await voice_utils.create_session_category(guild, session_id, mode)
+        # One category for the Bench, then one per game played at the same
+        # time (League 2, Rivals 1) - see the layout note in config.py.
+        # Created one after another so they sit in this order in the server.
+        num_slots = max(1, num_teams // 2)
+        prefix = f"{config.SESSION_CATEGORY_PREFIX} #{session_id}"
+        category = await voice_utils.create_named_category(
+            guild, f"{prefix} · {config.BENCH_CATEGORY_LABEL} ({mode.upper()})"
+        )
+        slot_categories = []
+        for n in range(1, num_slots + 1):
+            slot_categories.append(
+                await voice_utils.create_named_category(guild, f"{prefix} · {config.MATCH_CATEGORY_LABEL} {n}")
+            )
         progress_channel = await self._get_or_create_progress_channel(guild)
 
         # All the channels this session needs are independent of each other
@@ -1160,11 +1170,39 @@ class SessionCog(commands.Cog):
             for i, built_team in enumerate(built)
         ]
         bench_channel_task = voice_utils.create_bench_channel(guild, category, captain_ids)
-        control_channel_task = voice_utils.create_control_channel(guild, category, captain_ids)
-        channel_results = await asyncio.gather(*team_channel_tasks, bench_channel_task, control_channel_task)
+        sub_queue_channel_task = voice_utils.create_read_only_text_channel(
+            guild, category, config.SUB_QUEUE_CHANNEL_NAME
+        )
+        channel_results = await asyncio.gather(*team_channel_tasks, bench_channel_task, sub_queue_channel_task)
         team_channels = channel_results[:num_teams]
         bench_channel = channel_results[num_teams]
-        control_channel = channel_results[num_teams + 1]
+        sub_queue_channel = channel_results[num_teams + 1]
+
+        # Each game's two text channels, public one first so it sits on top.
+        # The team voice channels start in the Bench category and are moved
+        # under their game by _post_round (the same step that re-sorts them
+        # when League opponents change each round).
+        slots = []
+        for n, slot_category in enumerate(slot_categories, start=1):
+            public_channel = await voice_utils.create_read_only_text_channel(
+                guild, slot_category, config.MATCH_PUBLIC_CHANNEL_NAME.format(n=n)
+            )
+            captains_channel = await voice_utils.create_private_text_channel(
+                guild, slot_category, config.MATCH_CAPTAINS_CHANNEL_NAME.format(n=n)
+            )
+            slots.append({
+                "n": n,
+                "category_id": slot_category.id,
+                "public_channel_id": public_channel.id,
+                "captains_channel_id": captains_channel.id,
+                "team_ids": (),            # the two teams playing here this round
+                "match_id": None,
+                "round_no": None,
+                "public_message": None,    # rosters + Watch buttons
+                "panel": None,             # {"message", "view"} - this game's captain panel
+                "sub_queue_message": None, # this game's copy of the live Sub Queue
+                "captain_access": set(),   # member ids currently let into the captains channel
+            })
 
         # Ghosts get the same free-roaming Move Members access every captain
         # has across every team VC and Bench - NEVER session-control, since
@@ -1244,7 +1282,7 @@ class SessionCog(commands.Cog):
 
         db.set_session_channels(
             session_id, category_id=category.id, bench_id=bench_channel.id,
-            control_id=control_channel.id, progress_id=progress_channel.id,
+            control_id=slots[0]["captains_channel_id"], progress_id=progress_channel.id,
         )
 
         # anyone drafted beyond initial_team_size (only happens if actual_count
@@ -1274,9 +1312,11 @@ class SessionCog(commands.Cog):
             "mode": mode,
             "teams": teams_state,
             "bench_channel_id": bench_channel.id,
-            "control_channel_id": control_channel.id,
+            "sub_queue_channel_id": sub_queue_channel.id,
+            "slots": slots,
             "progress_channel_id": progress_channel.id,
-            "category_id": category.id,
+            "category_id": category.id,  # the Bench category
+            "category_ids": [category.id] + [c.id for c in slot_categories],  # everything to tear down at the end
             "announce_channel_id": announce_channel_id,
             "current_round": 1,
             "total_rounds": len(rounds),
@@ -1285,44 +1325,39 @@ class SessionCog(commands.Cog):
             "sub_lock": asyncio.Lock(),
             "spectators": {},  # user_id -> channel_id they're spectating, for auto-unmute on leave
             "spectate_lock": asyncio.Lock(),
-            "roster_message": None,
-            "control_panel": None,  # {"message", "view"} - the Add sub / Transfer / etc. button panel, kept so sub buttons can grey out live
+            "admin_panel": None,           # {"message", "view"} - the admin controls posted in the admin log
+            "admin_status_message": None,  # the live match status message in the admin log
             "bench_since": {},  # user_id -> {"seq", "at"}: when each person entered the Bench VC, so subs are pulled longest-waiting first
             "bench_seq": 0,
-            "sub_queue_message": None,  # the live "Sub Queue" message in session-control
+            "sub_queue_messages": [],   # the public copy of the live "Sub Queue" (each game's captains channel has its own)
             "sub_queue_task": None,     # pending debounced refresh of that message, if any
             "match_rosters": {},  # match_id -> {"team_a": {ids}, "team_b": {ids}} once frozen via Match Live
             "admin_log_channel_id": (db.get_guild_config(guild.id) or {}).get("admin_log_channel_id"),
             "is_test": is_test,
         }
 
-        await self._post_team_overview(guild, session_id)
-        await self._post_team_roster(guild, session_id)
-        control_channel_obj = guild.get_channel(control_channel.id)
-        # a full pop can start with every team already at its cap (Rivals at 22)
-        await self._sync_bench_visibility(guild, self.active_sessions[session_id])
-        control_view = SessionControlPanelView(self, session_id, teams_state, mode)
-        # a team that starts already at the roster ceiling begins greyed out, and the team
-        # with the fewest players starts with the turn
-        control_view.sync_sub_buttons(teams_state, self._sub_turn_team(self.active_sessions[session_id]))
-        control_message = await control_channel_obj.send(view=control_view)
-        self.active_sessions[session_id]["control_panel"] = {"message": control_message, "view": control_view}
-
-        # Live Sub Queue: whose turn it is + the Bench in longest-waiting-first order
         session_state = self.active_sessions[session_id]
-        session_state["sub_queue_message"] = await control_channel_obj.send(
-            embed=self._build_sub_queue_embed(session_state, guild)
-        )
+        # a full pop can start with every team already at its cap (Rivals at 22)
+        await self._sync_bench_visibility(guild, session_state)
+
+        # Live Sub Queue, public copy: whose turn it is + the Bench in
+        # longest-waiting-first order, so benched players can see their place.
+        try:
+            session_state["sub_queue_messages"].append(
+                await sub_queue_channel.send(embed=self._build_sub_queue_embed(session_state, guild))
+            )
+        except discord.HTTPException:
+            pass
         await self._post_round(guild, session_id, 1)
 
         announce_channel = guild.get_channel(announce_channel_id)
+        clubs_line = ", ".join(club_names)
         if announce_channel:
-            clubs_line = ", ".join(club_names)
             extra_note = f" (Started {missing} short of a full queue — late arrivals can join the Bench and be subbed in.)" if missing else ""
             test_note = " 🧪 **TEST SESSION — no MMR, wins/losses, or match history will be recorded.**" if is_test else ""
             await announce_channel.send(
                 f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
-                f"Captains — check {control_channel_obj.mention}."
+                f"Captains — your controls are in your match's captains channel."
             )
             if failed_moves:
                 # Discord can only move someone who's already connected to a
@@ -1341,61 +1376,283 @@ class SessionCog(commands.Cog):
             f"\n━━━━━━━━━━━━━━━━━━━━\n📋 **Session #{session_id} started** — {mode.title()} — "
             f"Teams: {clubs_line}\n━━━━━━━━━━━━━━━━━━━━",
         )
+        # the admin controls + live match status go right under that header line
+        await self._post_admin_panel(guild, session_id)
 
         return session_id
 
-    async def _post_team_overview(self, guild, session_id):
+    # ------------------------------------------------------ per-game channels
+    def captained_team(self, state, user_id):
+        """The team this user captains in this session, or None."""
+        return next((team_id for team_id, info in state["teams"].items() if info["captain_id"] == user_id), None)
+
+    def can_manage_player(self, interaction: discord.Interaction, state, player_id) -> bool:
+        """Admins can transfer/remove anyone. A captain only their OWN
+        players - never someone on another team."""
+        if interaction.user.guild_permissions.manage_guild:
+            return True
+        team_id = self.captained_team(state, interaction.user.id)
+        return team_id is not None and player_id in state["teams"][team_id]["on_field"]
+
+    def _match_status_text(self, state, match) -> str:
+        if match["status"] == "reported":
+            score = f"{match['score_a']}-{match['score_b']}" if match["score_a"] is not None else "final"
+            winner = state["teams"].get(match["winner_team_id"], {}).get("club_name", "?")
+            return f"✅ Finished {score} — **{winner}** won"
+        if match["id"] in state["match_rosters"]:
+            return "🔴 **LIVE**"
+        return "⏳ Waiting to start"
+
+    def _build_match_embed(self, session_id, slot, match=None):
+        """What everyone sees in a game's public match channel: the two
+        teams, their captains and players, and where the game is at."""
         state = self.active_sessions[session_id]
-        control_channel = guild.get_channel(state["control_channel_id"])
-        embed = discord.Embed(title="🎛️ NTF Session Control", color=discord.Color.blurple())
-        for team_id, info in state["teams"].items():
+        if match is None and slot["match_id"] is not None:
+            match = db.get_match(slot["match_id"])
+        clubs = [state["teams"][t]["club_name"] for t in slot["team_ids"]]
+        embed = discord.Embed(
+            title=f"Match {slot['n']} • Round {slot['round_no']}: {' vs '.join(clubs)}",
+            description=self._match_status_text(state, match) if match else None,
+            color=discord.Color.blurple(),
+        )
+        for team_id in slot["team_ids"]:
+            info = state["teams"][team_id]
+            member_lines = "\n".join(f"• <@{pid}>" for pid in info["on_field"]) or "*empty*"
+            embed.add_field(
+                name=f"{info['club_name']} ({len(info['on_field'])})",
+                value=f"**Captain:** {_captain_display(info['captain_id'])}\n{member_lines}",
+                inline=True,
+            )
+        embed.set_footer(text="Press a Watch button to spectate that team (you join muted).")
+        return embed
+
+    async def _sync_captains_access(self, guild, state, slot):
+        """Lets exactly the two captains playing in this game into its
+        captains channel, and takes out anyone who no longer belongs there
+        (League opponents change each round; captains get reassigned).
+        Derived from who captains the two teams right now, so it can be
+        called after any change and only does work when something differs."""
+        channel = guild.get_channel(slot["captains_channel_id"])
+        if not channel:
+            return
+        wanted = {state["teams"][t]["captain_id"] for t in slot["team_ids"]} - {None}
+        have = slot["captain_access"]
+        for uid in wanted - have:
+            member = guild.get_member(uid)
+            if member:
+                try:
+                    await channel.set_permissions(member, view_channel=True, send_messages=True)
+                except discord.HTTPException:
+                    pass
+        for uid in have - wanted:
+            member = guild.get_member(uid)
+            if member:
+                try:
+                    await channel.set_permissions(member, overwrite=None)
+                except discord.HTTPException:
+                    pass
+        slot["captain_access"] = set(wanted)
+
+    def _schedule_rename(self, guild, state, channel_id, name):
+        """Renames a channel or category in the background. Discord only
+        allows a couple of renames per channel every ten minutes and makes
+        the bot wait when that's used up, so this never blocks a round from
+        starting - it applies the most recently wanted name when it can."""
+        wanted = state.setdefault("rename_wanted", {})
+        applied = state.setdefault("rename_applied", {})
+        running = state.setdefault("rename_running", set())
+        wanted[channel_id] = name
+        if channel_id in running or applied.get(channel_id) == name:
+            return
+        running.add(channel_id)
+
+        async def _run():
+            try:
+                for _attempt in range(3):
+                    target = wanted.get(channel_id)
+                    if applied.get(channel_id) == target:
+                        return
+                    channel = guild.get_channel(channel_id)
+                    if not channel:
+                        return
+                    try:
+                        await channel.edit(name=target)
+                    except discord.HTTPException:
+                        return
+                    applied[channel_id] = target
+            finally:
+                running.discard(channel_id)
+
+        asyncio.create_task(_run())
+
+    async def _delete_quietly(self, message):
+        if message:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+
+    async def _assign_slot(self, guild, session_id, slot, match, round_no, n, total):
+        """Sets one game's category up for this round's fixture: moves the two
+        teams' voice channels under it, lets their two captains into the
+        captains channel, and posts a fresh public roster (with Watch
+        buttons), match-report buttons and captain panel."""
+        state = self.active_sessions[session_id]
+        team_a_id, team_b_id = match["team_a_id"], match["team_b_id"]
+        club_a = state["teams"][team_a_id]["club_name"]
+        club_b = state["teams"][team_b_id]["club_name"]
+        slot["team_ids"] = (team_a_id, team_b_id)
+        slot["match_id"] = match["id"]
+        slot["round_no"] = round_no
+
+        category = guild.get_channel(slot["category_id"])
+        if category:
+            for team_id in (team_a_id, team_b_id):
+                voice_channel = guild.get_channel(state["teams"][team_id]["voice_channel_id"])
+                if voice_channel and getattr(voice_channel, "category_id", None) != category.id:
+                    try:
+                        await voice_channel.edit(category=category)
+                    except discord.HTTPException:
+                        pass
+        self._schedule_rename(
+            guild, state, slot["category_id"],
+            f"{config.SESSION_CATEGORY_PREFIX} #{session_id} · {config.MATCH_CATEGORY_LABEL} {slot['n']} · {club_a} vs {club_b}"[:100],
+        )
+        await self._sync_captains_access(guild, state, slot)
+
+        # public match channel: one message, replaced each round
+        await self._delete_quietly(slot.get("public_message"))
+        slot["public_message"] = None
+        public_channel = guild.get_channel(slot["public_channel_id"])
+        if public_channel:
+            watch_view = SpectateView(self, session_id, [(team_a_id, club_a), (team_b_id, club_b)])
+            slot["public_message"] = await self._send_with_retry(
+                public_channel.send, embed=self._build_match_embed(session_id, slot, match), view=watch_view
+            )
+
+        # captains channel: round divider, the result buttons, then the roster
+        # panel and Sub Queue reposted underneath so they're always at the bottom
+        captains_channel = guild.get_channel(slot["captains_channel_id"])
+        if not captains_channel:
+            return
+        if slot.get("panel"):
+            await self._delete_quietly(slot["panel"]["message"])
+        await self._delete_quietly(slot.get("sub_queue_message"))
+        slot["panel"], slot["sub_queue_message"] = None, None
+
+        await self._send_with_retry(captains_channel.send, f"**━━━━━━━━━━ ROUND {round_no} ━━━━━━━━━━**")
+        control_embed = discord.Embed(
+            title=f"Round {round_no} • Match {n}/{total}: {club_a} vs {club_b}",
+            description="Captains: press **Match Live** at kick-off, then click the winner once the game finishes.",
+            color=discord.Color.orange(),
+        )
+        for team_id in (team_a_id, team_b_id):
+            info = state["teams"][team_id]
             mmrs = [db.get_player_mode_stats(state["guild_id"], pid, state["mode"])["mmr"] for pid in info["on_field"]]
             avg_mmr = round(sum(mmrs) / len(mmrs)) if mmrs else 0
-            embed.add_field(
+            control_embed.add_field(
                 name=info["club_name"],
                 value=f"Captain: {_captain_display(info['captain_id'])}\nPlayers: {len(mmrs)}\nAvg MMR: {avg_mmr}",
                 inline=True,
             )
-        embed.set_footer(text="Report results below. Only captains and admins can click.")
-        await control_channel.send(embed=embed)
+        match_view = MatchControlView(self, session_id, match["id"], team_a_id, club_a, team_b_id, club_b)
+        await self._send_with_retry(captains_channel.send, embed=control_embed, view=match_view)
 
-    def _build_roster_embed(self, session_id):
+        panel_view = CaptainPanelView(self, session_id, state["mode"])
+        panel_view.sync_sub_buttons(state["teams"], self._sub_turn_team(state))
+        panel_message = await self._send_with_retry(captains_channel.send, view=panel_view)
+        slot["panel"] = {"message": panel_message, "view": panel_view}
+        slot["sub_queue_message"] = await self._send_with_retry(
+            captains_channel.send, embed=self._build_sub_queue_embed(state, guild)
+        )
+
+    # ------------------------------------------------------ admin log panel
+    def _build_admin_status_embed(self, session_id, ended: bool = False):
         state = self.active_sessions[session_id]
-        embed = discord.Embed(title="📋 Team Rosters", color=discord.Color.blurple())
-        for info in state["teams"].values():
-            member_lines = "\n".join(f"• <@{pid}>" for pid in info["on_field"]) or "*empty*"
+        round_no = state["current_round"]
+        matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
+        title = f"Session #{session_id} — {state['mode'].title()} — Round {round_no}/{state['total_rounds']}"
+        embed = discord.Embed(
+            title=title + (" — ended" if ended else ""),
+            color=discord.Color.dark_grey() if ended else discord.Color.green(),
+        )
+        for n, match in enumerate(matches, start=1):
+            info_a = state["teams"][match["team_a_id"]]
+            info_b = state["teams"][match["team_b_id"]]
             embed.add_field(
-                name=info["club_name"],
-                value=f"**Captain:** {_captain_display(info['captain_id'])}\n{member_lines}",
-                inline=True,
+                name=f"Match {n}: {info_a['club_name']} vs {info_b['club_name']}",
+                value=(
+                    f"{self._match_status_text(state, match)}\n"
+                    f"Captains: {_captain_display(info_a['captain_id'])} / {_captain_display(info_b['captain_id'])}"
+                ),
+                inline=False,
             )
+        if not ended:
+            embed.set_footer(text="Updates by itself. Everything that happens is logged below.")
         return embed
 
-    async def _post_team_roster(self, guild, session_id):
-        """Posts the roster list to the permanent #in-progress channel so
-        everyone can see who's on which team and who's captaining, without
-        needing session-control access. Kept up to date via
-        _refresh_team_roster whenever a sub changes a team's composition."""
+    async def _post_admin_panel(self, guild, session_id):
+        """Posts this session's live match status and admin controls in the
+        admin log (the same channel every action is already logged to). If
+        the server has no admin log set up, there is simply no panel -
+        admins still have /force_end_session."""
         state = self.active_sessions[session_id]
-        progress_channel = guild.get_channel(state["progress_channel_id"])
-        message = await progress_channel.send(embed=self._build_roster_embed(session_id))
-        state["roster_message"] = message
-
-    async def _refresh_sub_buttons(self, session_id):
-        """Re-syncs the Add sub buttons in session-control with the current
-        rosters - a team at the hard ceiling gets its button greyed out, and
-        it comes back the moment they drop below it again (someone removed
-        or transferred out). Best-effort: a failed edit never blocks the
-        roster change that triggered it."""
-        state = self.active_sessions.get(session_id)
-        panel = state.get("control_panel") if state else None
-        if not panel:
+        channel = guild.get_channel(state["admin_log_channel_id"]) if state.get("admin_log_channel_id") else None
+        if not channel:
             return
-        panel["view"].sync_sub_buttons(state["teams"], self._sub_turn_team(state))
         try:
-            await panel["message"].edit(view=panel["view"])
+            status_message = await channel.send(embed=self._build_admin_status_embed(session_id))
+            view = AdminPanelView(self, session_id)
+            panel_message = await channel.send(f"🛠️ **Session #{session_id} — admin controls**", view=view)
+        except discord.HTTPException:
+            return
+        state["admin_status_message"] = status_message
+        state["admin_panel"] = {"message": panel_message, "view": view}
+        try:
+            await status_message.pin()  # keeps it one tap away as the log grows underneath
         except discord.HTTPException:
             pass
+
+    async def _refresh_status(self, session_id):
+        """Brings every "where is each game at" display up to date: the
+        status message in the admin log and each game's public match channel.
+        Called when a round starts, a match goes live, a result is reported
+        or undone."""
+        state = self.active_sessions.get(session_id)
+        if not state:
+            return
+        status_message = state.get("admin_status_message")
+        if status_message:
+            try:
+                await status_message.edit(embed=self._build_admin_status_embed(session_id))
+            except discord.HTTPException:
+                pass
+        for slot in state["slots"]:
+            message = slot.get("public_message")
+            if message and slot["team_ids"]:
+                try:
+                    await message.edit(embed=self._build_match_embed(session_id, slot))
+                except discord.HTTPException:
+                    pass
+
+    async def _refresh_sub_buttons(self, session_id):
+        """Re-syncs the Add sub button on every game's captain panel with the
+        current rosters - it shows whose turn it is, and greys out when no
+        team can take a sub. Best-effort: a failed edit never blocks the
+        roster change that triggered it."""
+        state = self.active_sessions.get(session_id)
+        if not state:
+            return
+        turn_team_id = self._sub_turn_team(state)
+        for slot in state["slots"]:
+            panel = slot.get("panel")
+            if not panel:
+                continue
+            panel["view"].sync_sub_buttons(state["teams"], turn_team_id)
+            try:
+                await panel["message"].edit(view=panel["view"])
+            except discord.HTTPException:
+                pass
 
     async def _sync_bench_visibility(self, guild, state):
         """The Bench only exists to feed subs onto teams, so while EVERY team
@@ -1468,13 +1725,12 @@ class SessionCog(commands.Cog):
             for team_id in state["teams"]:
                 self._schedule_team_name_sync(guild, state, team_id)
             await self._sync_bench_visibility(guild, state)
-        message = state.get("roster_message")
-        if not message:
-            return
-        try:
-            await message.edit(embed=self._build_roster_embed(session_id))
-        except discord.HTTPException:
-            pass
+            # a transfer, removal or reassignment can change who captains a team
+            for slot in state["slots"]:
+                if slot["team_ids"]:
+                    await self._sync_captains_access(guild, state, slot)
+        # rosters (and captains) shown in each game's public channel + the admin status
+        await self._refresh_status(session_id)
 
     # -------------------------------------------------------------- rounds
     async def _send_with_retry(self, coro_func, *args, retries=2, delay=1.5, **kwargs):
@@ -1519,26 +1775,18 @@ class SessionCog(commands.Cog):
     async def _post_round(self, guild, session_id, round_no):
         state = self.active_sessions[session_id]
         matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
-        control_channel = guild.get_channel(state["control_channel_id"])
         progress_channel = guild.get_channel(state["progress_channel_id"])
+        slots = state["slots"]
 
-        # clear round divider so captains can tell fixtures apart at a glance
-        await self._send_with_retry(control_channel.send, f"**━━━━━━━━━━ ROUND {round_no} ━━━━━━━━━━**")
-
-        watch_targets = []
         embed_index = {}
         progress_embeds = []
         for n, match in enumerate(matches, start=1):
             club_a = state["teams"][match["team_a_id"]]["club_name"]
             club_b = state["teams"][match["team_b_id"]]["club_name"]
 
-            control_embed = discord.Embed(
-                title=f"Round {round_no} • Match {n}/{len(matches)}: {club_a} vs {club_b}",
-                description="Captains, click your side once the game finishes.",
-                color=discord.Color.orange(),
-            )
-            view = MatchControlView(self, session_id, match["id"], match["team_a_id"], club_a, match["team_b_id"], club_b)
-            await self._send_with_retry(control_channel.send, embed=control_embed, view=view)
+            # this round's n-th fixture is played in the n-th game category
+            slot = slots[min(n, len(slots)) - 1]
+            await self._assign_slot(guild, session_id, slot, match, round_no, n, len(matches))
 
             # one SEPARATE embed per fixture in #in-progress - a distinct
             # coloured card per matchup is a much clearer split between the
@@ -1551,20 +1799,18 @@ class SessionCog(commands.Cog):
             progress_embeds.append(fixture_embed)
             embed_index[match["id"]] = n - 1
 
-            watch_targets.append((match["team_a_id"], club_a))
-            watch_targets.append((match["team_b_id"], club_b))
-
+        # #in-progress keeps the round-by-round scores; rosters and the Watch
+        # buttons now live in each game's public match channel.
         header_embed = discord.Embed(title=f"📺 Round {round_no} — Now Playing", color=discord.Color.green())
         all_embeds = [header_embed] + progress_embeds
-
-        spectate_view = SpectateView(self, session_id, watch_targets)
-        progress_message = await self._send_with_retry(progress_channel.send, embeds=all_embeds, view=spectate_view)
+        progress_message = await self._send_with_retry(progress_channel.send, embeds=all_embeds)
 
         state["progress_round_message"] = {
             "message": progress_message,
             "embed_index": embed_index,   # match_id -> index INTO fixture embeds (add 1 for real embeds list index)
             "round_no": round_no,
         }
+        await self._refresh_status(session_id)
 
     def _round_result_line(self, club_a, score_a, club_b, score_b, a_won, went_to_pens=False):
         score_text = f"{score_a} - {score_b}" if score_a is not None else "final"
@@ -1721,6 +1967,7 @@ class SessionCog(commands.Cog):
 
         guild = interaction.guild
         await self._update_progress_field(session_id, match_id, club_a, club_b, score_a, score_b, a_won, went_to_pens)
+        await self._refresh_status(session_id)
         if not state["is_test"]:
             await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
 
@@ -1850,9 +2097,14 @@ class SessionCog(commands.Cog):
             f"All player MMR is already up to date. Voice channels close automatically in {config.SESSION_CLOSE_DELAY_SECONDS} seconds."
         embed.set_footer(text=footer)
 
-        control_channel = guild.get_channel(state["control_channel_id"])
         progress_channel = guild.get_channel(state["progress_channel_id"])
-        await control_channel.send(embed=embed)
+        for slot in state["slots"]:
+            captains_channel = guild.get_channel(slot["captains_channel_id"])
+            if captains_channel:
+                try:
+                    await captains_channel.send(embed=embed)
+                except discord.HTTPException:
+                    pass
         await progress_channel.send(embed=embed)
         if not state["is_test"]:
             await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
@@ -2067,8 +2319,16 @@ class SessionCog(commands.Cog):
             # Same hard ceiling as Add Sub - a team can never exceed
             # the mode's cap. Check this BEFORE touching anything, so a
             # blocked transfer doesn't still rip the player off their old team.
-            if len(state["teams"][dest_team_id]["on_field"]) >= _cap(state):
+            # A transfer only fills a team to its NORMAL size. Where the cap is
+            # higher (League: 6, then a 7th), that last seat is only ever
+            # filled through Request Nth player, never by a transfer.
+            if len(state["teams"][dest_team_id]["on_field"]) >= _normal(state):
                 dest_club = state["teams"][dest_team_id]["club_name"]
+                if _cap(state) > _normal(state):
+                    return False, False, (
+                        f"{dest_club} already has {_normal(state)} players — a {_ordinal(_cap(state))} can only be "
+                        f"added with Request {_ordinal(_cap(state))} player"
+                    )
                 return False, False, f"{dest_club} is already at its maximum of {_cap(state)} players"
 
             # remove from any other team they're currently on
@@ -2146,12 +2406,8 @@ class SessionCog(commands.Cog):
                     await bench_channel.set_permissions(new_captain, view_channel=True, connect=True, move_members=True)
                 except discord.HTTPException:
                     pass
-            control_channel = guild.get_channel(state["control_channel_id"])
-            if control_channel:
-                try:
-                    await control_channel.set_permissions(new_captain, view_channel=True, send_messages=True)
-                except discord.HTTPException:
-                    pass
+            # their game's captains channel is opened to them by
+            # _refresh_team_roster below (via _sync_captains_access)
 
         club_name = state["teams"][team_id]["club_name"]
         progress_channel = guild.get_channel(state["progress_channel_id"])
@@ -2228,9 +2484,22 @@ class SessionCog(commands.Cog):
         # actual "ending" of the session. The permanent text channels get
         # cleaned up separately below, with a grace period so people can
         # still read what happened before it disappears.
-        category = guild.get_channel(state["category_id"])
-        if category:
-            await voice_utils.teardown_session_category(guild, category)
+        for category_id in state.get("category_ids") or [state["category_id"]]:
+            category = guild.get_channel(category_id)
+            if category:
+                await voice_utils.teardown_session_category(guild, category)
+
+        # admin log: take the controls away, leave the final status behind as part of the record
+        admin_panel = state.get("admin_panel")
+        if admin_panel:
+            await self._delete_quietly(admin_panel["message"])
+        status_message = state.get("admin_status_message")
+        if status_message:
+            try:
+                await status_message.edit(embed=self._build_admin_status_embed(session_id, ended=True))
+                await status_message.unpin()
+            except discord.HTTPException:
+                pass
 
         progress_channel_id = state["progress_channel_id"]
         guild_id = state["guild_id"]

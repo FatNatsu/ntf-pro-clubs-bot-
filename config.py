@@ -142,7 +142,29 @@ RANK_THRESHOLDS = [
 # ---------------------------------------------------------------------------
 SESSION_CATEGORY_PREFIX = "PRO CLUBS SESSION"
 BENCH_CHANNEL_NAME = "🪑 Bench"
-SESSION_CONTROL_CHANNEL_NAME = "🎛️ session-control"
+SESSION_CONTROL_CHANNEL_NAME = "🎛️ session-control"   # no longer created (see the per-game channels below)
+
+# A session's channels are laid out as one small category for the Bench and
+# then one category per game being played at the same time (League has two
+# games a round, Rivals one):
+#
+#   <prefix> #12 · BENCH
+#       📋 sub-queue            public, read-only: whose turn + who's waiting
+#       🪑 Bench                (voice)
+#   <prefix> #12 · MATCH 1 · Club A vs Club B
+#       📋 match-1              public, read-only: both rosters + Watch buttons
+#       🎛️ match-1-captains     that game's two captains (and admins) only
+#       Club A                  (voice)
+#       Club B                  (voice)
+#   <prefix> #12 · MATCH 2 · ...
+#
+# Discord always lists a category's text channels above its voice channels,
+# which is why each game needs a category of its own.
+BENCH_CATEGORY_LABEL = "BENCH"
+MATCH_CATEGORY_LABEL = "MATCH"
+SUB_QUEUE_CHANNEL_NAME = "📋 sub-queue"
+MATCH_PUBLIC_CHANNEL_NAME = "📋 match-{n}"
+MATCH_CAPTAINS_CHANNEL_NAME = "🎛️ match-{n}-captains"
 IN_PROGRESS_CHANNEL_NAME = "📺 in-progress"      # permanent, created once via /ntf_setup
 LEADERBOARD_CHANNEL_NAME = "🏆 leaderboard"       # permanent, created once via /ntf_setup
 HISTORY_CHANNEL_NAME = "📜 session-history"        # permanent, created once via /ntf_setup
