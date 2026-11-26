@@ -486,6 +486,16 @@ class AdminCog(commands.Cog):
                 mode_stats = db.get_player_mode_stats(guild_id, pid, mode)
                 players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
 
+        # Testing BEING subbed in only works if you're an ordinary player: a
+        # captain is tied to their team. So for start_on_bench you go to the
+        # back of the list and are never picked as a captain (in memory only -
+        # your real captain flag in the database is untouched).
+        if start_on_bench:
+            for p in players:
+                if p["discord_id"] == real_id:
+                    p["is_captain"] = 0
+            players.sort(key=lambda p: p["discord_id"] == real_id)
+
         # Force the second tester to be treated as captain-eligible for the
         # draft - this is an in-memory-only override on the player dict
         # passed into team_balance, it does NOT touch their persistent
