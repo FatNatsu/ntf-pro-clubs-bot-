@@ -201,6 +201,13 @@ def init_db():
             conn.execute("ALTER TABLE sessions ADD COLUMN winning_team_id INTEGER")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # went_to_pens: the match was won in a shootout (its score columns
+        # then hold no goals, since shootout goals never count toward GD).
+        # Old rows default to 0. Additive only - nothing existing changes.
+        try:
+            conn.execute("ALTER TABLE matches ADD COLUMN went_to_pens INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         try:
             conn.execute("ALTER TABLE guild_config ADD COLUMN history_channel_id INTEGER")
         except sqlite3.OperationalError:
@@ -936,6 +943,80 @@ def report_match_result(match_id, winner_team_id, score_a=None, score_b=None):
         )
 
 
+def record_match_result(match_id, winner_team_id, score_a, score_b, went_to_pens=False, *,
+                        guild_id=None, session_id=None, mode=None, team_a_id=None, team_b_id=None,
+                        team_a_player_ids=(), team_b_player_ids=(), club_a=None, club_b=None,
+                        a_won=None, new_mmr=None, mmr_deltas=None, record_stats=True):
+    """Records one match result in a single transaction (NTF-009): the
+    match row, every player's new MMR (visible and hidden) and win/loss, the
+    participant rows with their exact MMR change, and both club rows. If
+    anything fails, nothing is saved. Returns False without changing
+    anything if the match was already reported, so a result can never be
+    counted twice. Test sessions pass record_stats=False: only the match row
+    is written."""
+    new_mmr = new_mmr or {}
+    mmr_deltas = mmr_deltas or {}
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE matches SET winner_team_id=?, score_a=?, score_b=?, went_to_pens=?, status='reported', "
+            "reported_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'",
+            (winner_team_id, score_a, score_b, 1 if went_to_pens else 0, match_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        if not record_stats:
+            return True
+        winner_ids = set(team_a_player_ids if a_won else team_b_player_ids)
+        hidden = "hidden_mmr=MAX(0, COALESCE(hidden_mmr, mmr) + (? - mmr))"
+        for pid, value in new_mmr.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO player_mode_stats (guild_id, discord_id, mode, mmr) VALUES (?, ?, ?, ?)",
+                (guild_id, pid, mode, config.STARTING_MMR),
+            )
+            counter = "wins=wins+1" if pid in winner_ids else "losses=losses+1"
+            conn.execute(
+                f"UPDATE player_mode_stats SET {hidden}, mmr=?, {counter} WHERE guild_id=? AND discord_id=? AND mode=?",
+                (value, value, guild_id, pid, mode),
+            )
+        for team_id, club, ids, won in ((team_a_id, club_a, team_a_player_ids, a_won), (team_b_id, club_b, team_b_player_ids, not a_won)):
+            for pid in ids:
+                conn.execute(
+                    "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (guild_id, match_id, session_id, pid, team_id, club, "win" if won else "loss", mmr_deltas.get(pid, 0), mode),
+                )
+            conn.execute(
+                "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
+                (guild_id, match_id, club, "win" if won else "loss", mode),
+            )
+        return True
+
+
+def award_session_win(session_id, winning_team_id, guild_id=None, mode=None, player_ids=(), bonus=0):
+    """Marks a session's winner and gives the bonus, once (NTF-010). The
+    winner and every bonus go in one transaction, and only if no winner has
+    been recorded yet - so a second call (a race, a retry) changes nothing.
+    Returns True if this call awarded it. The bonus moves visible MMR only,
+    as before; hidden MMR is not touched."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET winning_team_id=? WHERE id=? AND winning_team_id IS NULL",
+            (winning_team_id, session_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        for pid in player_ids if bonus else ():
+            conn.execute(
+                "INSERT OR IGNORE INTO player_mode_stats (guild_id, discord_id, mode, mmr) VALUES (?, ?, ?, ?)",
+                (guild_id, pid, mode, config.STARTING_MMR),
+            )
+            conn.execute(
+                "UPDATE player_mode_stats SET mmr=MAX(0, mmr+?) WHERE guild_id=? AND discord_id=? AND mode=?",
+                (bonus, guild_id, pid, mode),
+            )
+        return True
+
+
 def undo_match_result(match_id):
     """Reverses a previously-reported match: undoes each participant's exact
     recorded MMR delta and win/loss increment, deletes their
@@ -980,7 +1061,8 @@ def undo_match_result(match_id):
         conn.execute("DELETE FROM match_participants WHERE match_id=?", (match_id,))
         conn.execute("DELETE FROM club_match_results WHERE match_id=?", (match_id,))
         conn.execute(
-            "UPDATE matches SET status='pending', winner_team_id=NULL, score_a=NULL, score_b=NULL, reported_at=NULL WHERE id=?",
+            "UPDATE matches SET status='pending', winner_team_id=NULL, score_a=NULL, score_b=NULL, went_to_pens=0, "
+            "reported_at=NULL WHERE id=?",
             (match_id,),
         )
         return affected

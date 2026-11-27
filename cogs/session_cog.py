@@ -42,6 +42,30 @@ def _team_channel_name(state, team_id) -> str:
     return info["club_name"]
 
 
+MAX_GOALS = 99
+
+
+def validate_scoreline(winner_raw, loser_raw, winner_club, loser_club, went_to_pens=False):
+    """Checks a typed scoreline (NTF-011). Returns (winner_goals, loser_goals,
+    None) or (None, None, reason). Both scores must be whole numbers from 0
+    to 99. A normal win needs the winner ahead; a regulation score before a
+    shootout must be level."""
+    try:
+        w, l = int(str(winner_raw).strip()), int(str(loser_raw).strip())
+    except (TypeError, ValueError):
+        return None, None, "Scores must be whole numbers, like 3 and 1."
+    if w < 0 or l < 0 or w > MAX_GOALS or l > MAX_GOALS:
+        return None, None, f"Scores must be between 0 and {MAX_GOALS}."
+    if went_to_pens:
+        if w != l:
+            return None, None, "A game that went to penalties must be level after normal time."
+    elif w <= l:
+        if w == l:
+            return None, None, f"{w}-{l} is a draw. If it went to penalties, use Went to Penalties instead."
+        return None, None, f"{winner_club} can't win {w}-{l}. Check who won, or swap the scores."
+    return w, l, None
+
+
 class ScoreModal(discord.ui.Modal):
     """Popup asking for the scoreline once a captain/admin picks a winner.
     went_to_pens changes the labels to make clear this is the regulation
@@ -73,11 +97,13 @@ class ScoreModal(discord.ui.Modal):
         self.add_item(self.loser_score)
 
     async def on_submit(self, interaction: discord.Interaction):
-        try:
-            w_score = int(self.winner_score.value)
-            l_score = int(self.loser_score.value)
-        except ValueError:
-            w_score, l_score = None, None
+        w_score, l_score, problem = validate_scoreline(
+            self.winner_score.value, self.loser_score.value, self.winner_club, self.loser_club, self.went_to_pens
+        )
+        if problem:
+            # nothing is recorded - the buttons stay as they were so it can be reported again
+            await interaction.response.send_message(f"❌ {problem} Nothing was recorded — press the winner again.", ephemeral=True)
+            return
         await self.cog.finalize_match(
             interaction, self.match_id, self.winner_team_id, self.loser_team_id,
             w_score, l_score, self.origin_view, self.origin_message, self.went_to_pens,
@@ -162,6 +188,18 @@ class MatchControlView(discord.ui.View):
             if not interaction.user.guild_permissions.manage_guild:
                 await interaction.response.send_message("Only an admin can undo a match result.", ephemeral=True)
                 return
+            undo_state = self.cog.active_sessions.get(self.session_id)
+            if undo_state and undo_state.get("finished"):
+                # NTF-013: the final standings and the session bonus are
+                # already decided from this result; undoing it now would
+                # leave them wrong. Use the admin correction commands instead.
+                await interaction.response.send_message(
+                    "This session's final standings are already in, so its results can't be undone here — the "
+                    "standings and the session bonus would no longer match. Use the admin MMR and win/loss "
+                    "correction commands if something needs fixing.",
+                    ephemeral=True,
+                )
+                return
             await interaction.response.defer(ephemeral=True)
             affected = db.undo_match_result(self.match_id)
             if affected is None:
@@ -171,6 +209,7 @@ class MatchControlView(discord.ui.View):
             # re-enable the win buttons so it can be correctly re-reported
             self.btn_a.disabled = False
             self.btn_b.disabled = False
+            self.btn_pens.disabled = False
             self.btn_a.style = discord.ButtonStyle.danger
             self.btn_b.style = discord.ButtonStyle.danger
             self.btn_a.emoji = "🔴"
@@ -341,6 +380,12 @@ class TransferDestinationView(discord.ui.View):
                 "You can only transfer players from the team you captain.", ephemeral=True
             )
             return
+        if not any(self.player_id in info["on_field"] for info in state["teams"].values()):
+            await interaction.followup.send("They're not on a team any more — nothing was changed.", ephemeral=True)
+            return
+        if self.player_id in state["teams"][dest_team_id]["on_field"]:
+            await interaction.followup.send("They're already on that team.", ephemeral=True)
+            return
         added, moved, reason = await self.cog.transfer_player(interaction.guild, self.session_id, state, self.player_id, dest_team_id)
         club_name = state["teams"][dest_team_id]["club_name"]
         if not added:
@@ -377,7 +422,7 @@ class ReassignCaptainPlayerSelectView(discord.ui.View):
             label = member.display_name if member else str(pid)
             if pid == info["captain_id"]:
                 label += " (current captain)"
-            options.append(discord.SelectOption(label=label, value=str(pid)))
+            options.append(discord.SelectOption(label=label[:100], value=str(pid)))
 
         if options:
             select = discord.ui.Select(placeholder=f"New captain for {info['club_name']}?", options=options[:25])
@@ -390,6 +435,12 @@ class ReassignCaptainPlayerSelectView(discord.ui.View):
         state = self.cog.active_sessions.get(self.session_id)
         if not state:
             await interaction.followup.send("This session has ended.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.followup.send("Only an admin can reassign a captain.", ephemeral=True)
+            return
+        if new_captain_id not in state["teams"][self.team_id]["on_field"]:
+            await interaction.followup.send("They're not on that team any more — open Reassign Captain again.", ephemeral=True)
             return
         if new_captain_id == state["teams"][self.team_id]["captain_id"]:
             await interaction.followup.send("They're already the captain of that team.", ephemeral=True)
@@ -413,7 +464,7 @@ class ReassignCaptainTeamSelectView(discord.ui.View):
         state = cog.active_sessions[session_id]
         options = [
             discord.SelectOption(
-                label=f"{info['club_name']} (captain: {cog.bot.get_user(info['captain_id']).display_name if info['captain_id'] and cog.bot.get_user(info['captain_id']) else 'none assigned'})",
+                label=f"{info['club_name']} (captain: {cog.bot.get_user(info['captain_id']).display_name if info['captain_id'] and cog.bot.get_user(info['captain_id']) else 'none assigned'})"[:100],
                 value=str(team_id),
             )
             for team_id, info in state["teams"].items()
@@ -455,7 +506,7 @@ class RemovePlayerSelectView(discord.ui.View):
             for pid in info["on_field"]:
                 member = cog.bot.get_user(pid)
                 label = member.display_name if member else str(pid)
-                options.append(discord.SelectOption(label=f"{label} ({info['club_name']})", value=f"{team_id}:{pid}"))
+                options.append(discord.SelectOption(label=f"{label} ({info['club_name']})"[:100], value=f"{team_id}:{pid}"))
 
         if options:
             select = discord.ui.Select(placeholder="Remove which player from their team entirely?", options=options[:25])
@@ -475,6 +526,9 @@ class RemovePlayerSelectView(discord.ui.View):
                 "You can only remove players from the team you captain.", ephemeral=True
             )
             return
+        if player_id not in state["teams"][team_id]["on_field"]:
+            await interaction.followup.send("They're not on that team any more — nothing was changed.", ephemeral=True)
+            return
         club_name = state["teams"][team_id]["club_name"]
         await self.cog.remove_player_from_roster(interaction.guild, self.session_id, team_id, player_id)
         await interaction.followup.send(f"❌ Removed <@{player_id}> from **{club_name}**'s roster. That slot is now free.", ephemeral=True)
@@ -482,6 +536,48 @@ class RemovePlayerSelectView(discord.ui.View):
             self.session_id,
             f"❌ <@{interaction.user.id}> removed <@{player_id}> from **{club_name}**'s roster entirely.",
         )
+
+
+class TeamFirstSelectView(discord.ui.View):
+    """NTF-016: Discord menus hold at most 25 options and a full League
+    session can have 28 rostered players. When the admin list would be
+    longer than 25, this asks for the club first and then shows that club's
+    players (7 at most in League, 11 in Rivals), so everyone can be picked."""
+
+    def __init__(self, cog: "SessionCog", session_id, player_view_cls, prompt: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.session_id = session_id
+        self.player_view_cls = player_view_cls
+        self.prompt = prompt
+        state = cog.active_sessions[session_id]
+        options = [
+            discord.SelectOption(label=f"{info['club_name']} ({len(info['on_field'])})"[:100], value=str(team_id))
+            for team_id, info in state["teams"].items() if info["on_field"]
+        ]
+        if options:
+            select = discord.ui.Select(placeholder="Which club?", options=options[:25])
+            select.callback = self._on_select
+            self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        team_id = int(interaction.data["values"][0])
+        if not self.cog.active_sessions.get(self.session_id):
+            await interaction.response.send_message("This session has ended.", ephemeral=True)
+            return
+        view = self.player_view_cls(self.cog, self.session_id, only_team_id=team_id)
+        if not view.children:
+            await interaction.response.send_message("Nobody is on that team right now.", ephemeral=True)
+            return
+        await interaction.response.send_message(self.prompt, view=view, ephemeral=True)
+
+
+def _player_picker(cog, session_id, player_view_cls, prompt):
+    """The player menu, or a club menu first when the list is over 25."""
+    state = cog.active_sessions[session_id]
+    if sum(len(info["on_field"]) for info in state["teams"].values()) > 25:
+        return TeamFirstSelectView(cog, session_id, player_view_cls, prompt)
+    return player_view_cls(cog, session_id)
 
 
 class TransferPlayerSelectView(discord.ui.View):
@@ -502,7 +598,7 @@ class TransferPlayerSelectView(discord.ui.View):
             for pid in info["on_field"]:
                 member = cog.bot.get_user(pid)
                 label = member.display_name if member else str(pid)
-                options.append(discord.SelectOption(label=f"{label} ({info['club_name']})", value=str(pid)))
+                options.append(discord.SelectOption(label=f"{label} ({info['club_name']})"[:100], value=str(pid)))
 
         if options:
             select = discord.ui.Select(placeholder="Which player do you want to transfer?", options=options[:25])
@@ -690,7 +786,7 @@ class AdminPanelView(discord.ui.View):
         state = await self._state(interaction)
         if not state:
             return
-        view = TransferPlayerSelectView(self.cog, self.session_id)
+        view = _player_picker(self.cog, self.session_id, TransferPlayerSelectView, "Who do you want to transfer?")
         if not view.children:
             await interaction.response.send_message("Nobody is currently rostered to transfer.", ephemeral=True)
             return
@@ -700,7 +796,7 @@ class AdminPanelView(discord.ui.View):
         state = await self._state(interaction)
         if not state:
             return
-        view = RemovePlayerSelectView(self.cog, self.session_id)
+        view = _player_picker(self.cog, self.session_id, RemovePlayerSelectView, "Remove who from their team entirely?")
         if not view.children:
             await interaction.response.send_message("Nobody is currently rostered to remove.", ephemeral=True)
             return
@@ -1480,7 +1576,10 @@ class SessionCog(commands.Cog):
             a_won = m["winner_team_id"] == m["team_a_id"]
             left = f"👑 **{club_a}**" if a_won else club_a
             right = f"**{club_b}** 👑" if not a_won else club_b
-            score = f"{m['score_a']} - {m['score_b']}" if m["score_a"] is not None else "v"
+            if m.get("went_to_pens"):
+                score = "pens"
+            else:
+                score = f"{m['score_a']} - {m['score_b']}" if m["score_a"] is not None else "v"
             lines.append(f"R{m['round_no']} · {left}  {score}  {right}")
         return "\n".join(lines)[:1024]
 
@@ -1931,64 +2030,80 @@ class SessionCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         match = db.get_match(match_id)
+        if not match:
+            await interaction.followup.send("That match no longer exists.", ephemeral=True)
+            return
         session_id = match["session_id"]
         state = self.active_sessions.get(session_id)
-        if not state:
+        if not state or state.get("ending"):
             await interaction.followup.send("This session has ended.", ephemeral=True)
             return
-
-        if match["status"] == "reported":
-            # Someone else already reported this exact match - most likely
-            # a double-click, or two people (a captain and an admin) both
-            # trying to report around the same time. Without this check,
-            # finalize_match would happily run a second time and double the
-            # win, the loss, and the MMR change for every player in it.
+        team_a_id, team_b_id = match["team_a_id"], match["team_b_id"]
+        if {winner_team_id, loser_team_id} != {team_a_id, team_b_id}:
+            await interaction.followup.send("Those teams aren't the two in this match — nothing was recorded.", ephemeral=True)
+            return
+        # NTF-014: authority is checked again now, when the result is saved,
+        # not only when the button was pressed - a captain who has since been
+        # replaced can't report with a popup they opened earlier.
+        if not self.is_captain_or_admin(interaction, session_id, {team_a_id, team_b_id}):
             await interaction.followup.send(
-                "This match was already reported — refusing to record it a second time. "
-                "If the result was wrong, use the admin correction commands to fix it instead.",
+                "You're not a captain of either team any more (or a server admin), so this result wasn't recorded.",
                 ephemeral=True,
             )
-            origin_view.btn_a.disabled = True
-            origin_view.btn_b.disabled = True
-            origin_view.btn_live.disabled = True
+            return
+
+        async def refuse_duplicate():
+            # Already reported - a double-click, or a captain and an admin
+            # reporting at the same moment. Never counted twice.
+            await interaction.followup.send(
+                "This match was already reported — refusing to record it a second time. "
+                "If the result was wrong, an admin can use Undo Result and report it again.",
+                ephemeral=True,
+            )
+            for btn in (origin_view.btn_a, origin_view.btn_b, origin_view.btn_live, origin_view.btn_pens, origin_view.btn_pause):
+                btn.disabled = True
             try:
                 await origin_message.edit(view=origin_view)
             except discord.HTTPException:
                 pass
+
+        if match["status"] == "reported":
+            await refuse_duplicate()
             return
 
-        team_a_id, team_b_id = match["team_a_id"], match["team_b_id"]
         a_won = winner_team_id == team_a_id
         team_a_players = self._team_players_for_match(session_id, team_a_id, match_id, "team_a")
         team_b_players = self._team_players_for_match(session_id, team_b_id, match_id, "team_b")
+        club_a = state["teams"][team_a_id]["club_name"]
+        club_b = state["teams"][team_b_id]["club_name"]
+        score_a = winner_score if a_won else loser_score
+        score_b = loser_score if a_won else winner_score
 
         # Test sessions (/debug_test_session) skip every real-stat write -
         # no MMR, no win/loss counts, no match/club history - while still
         # running the full match-reporting flow (buttons, rounds, standings)
         # so the experience is otherwise identical to a real session.
+        mmr_updates, mmr_deltas = {}, {}
         if not state["is_test"]:
             # individual player MMR only - clubs/teams never carry MMR themselves
             mmr_updates = mmr.apply_match_result(team_a_players, team_b_players, a_won)
-            winner_ids = {p["discord_id"] for p in (team_a_players if a_won else team_b_players)}
             old_mmr_by_id = {p["discord_id"]: p["mmr"] for p in team_a_players + team_b_players}
-            mmr_deltas = {discord_id: new_mmr - old_mmr_by_id[discord_id] for discord_id, new_mmr in mmr_updates.items()}
-            for discord_id, new_mmr in mmr_updates.items():
-                db.update_mode_mmr(state["guild_id"], discord_id, state["mode"], new_mmr, won=discord_id in winner_ids)
-        else:
-            mmr_deltas = {}
+            mmr_deltas = {discord_id: new - old_mmr_by_id[discord_id] for discord_id, new in mmr_updates.items()}
 
-        score_a = winner_score if a_won else loser_score
-        score_b = loser_score if a_won else winner_score
-        db.report_match_result(match_id, winner_team_id, score_a, score_b)
-
-        club_a = state["teams"][team_a_id]["club_name"]
-        club_b = state["teams"][team_b_id]["club_name"]
-        if not state["is_test"]:
-            db.record_match_participants(
-                state["guild_id"], match_id, session_id, team_a_id, team_b_id,
-                [p["discord_id"] for p in team_a_players], [p["discord_id"] for p in team_b_players],
-                club_a, club_b, a_won, state["mode"], mmr_deltas=mmr_deltas,
-            )
+        # NTF-009: one transaction for the whole result. If the match was
+        # reported in the meantime, nothing is written.
+        recorded = db.record_match_result(
+            match_id, winner_team_id, score_a, score_b, went_to_pens,
+            guild_id=state["guild_id"], session_id=session_id, mode=state["mode"],
+            team_a_id=team_a_id, team_b_id=team_b_id,
+            team_a_player_ids=[p["discord_id"] for p in team_a_players],
+            team_b_player_ids=[p["discord_id"] for p in team_b_players],
+            club_a=club_a, club_b=club_b, a_won=a_won,
+            new_mmr=mmr_updates, mmr_deltas=mmr_deltas, record_stats=not state["is_test"],
+        )
+        if not recorded:
+            await refuse_duplicate()
+            return
 
         winner_club = state["teams"][winner_team_id]["club_name"]
 
@@ -2003,11 +2118,10 @@ class SessionCog(commands.Cog):
             except Exception:
                 logging.getLogger("ntf").exception("result post failed for match %s", match_id)
 
-        # flip the control-room buttons: winner green + disabled, loser grey + disabled
-        origin_view.btn_a.disabled = True
-        origin_view.btn_b.disabled = True
-        origin_view.btn_live.disabled = True
-        origin_view.btn_pause.disabled = True
+        # flip the control-room buttons: winner green + disabled, loser grey +
+        # disabled, and Went to Penalties off too (NTF-014)
+        for btn in (origin_view.btn_a, origin_view.btn_b, origin_view.btn_live, origin_view.btn_pause, origin_view.btn_pens):
+            btn.disabled = True
         state.setdefault("paused_matches", set()).discard(match_id)
         if winner_team_id == origin_view.team_a_id:
             origin_view.btn_a.style = discord.ButtonStyle.success
@@ -2017,23 +2131,31 @@ class SessionCog(commands.Cog):
             origin_view.btn_b.style = discord.ButtonStyle.success
             origin_view.btn_b.emoji = "👑"
             origin_view.btn_a.style = discord.ButtonStyle.secondary
-        await origin_message.edit(view=origin_view)
 
+        # The result is saved. From here on every Discord update is
+        # best-effort: a failed edit or post is logged but can never stop the
+        # round moving on, and never records the result again (NTF-009).
         guild = interaction.guild
-        await self._refresh_status(session_id)
-        if not state["is_test"]:
-            await leaderboard_utils.refresh_leaderboard_channel(self.bot, guild)
-
         pens_note = " (on penalties)" if went_to_pens else ""
         test_note = " *(test — not recorded)*" if state["is_test"] else ""
-        await interaction.followup.send(f"Result recorded — {winner_club} win{pens_note} ✅{test_note}", ephemeral=True)
-
         score_text = "" if went_to_pens else f" {score_a}-{score_b}"
-        await self._log_action(
-            session_id,
-            f"🔴 <@{interaction.user.id}> reported: **{club_a}** vs **{club_b}**{score_text} — "
-            f"winner **{winner_club}**{pens_note}.",
-        )
+        steps = [
+            lambda: origin_message.edit(view=origin_view),
+            lambda: self._refresh_status(session_id),
+            lambda: interaction.followup.send(f"Result recorded — {winner_club} win{pens_note} ✅{test_note}", ephemeral=True),
+            lambda: self._log_action(
+                session_id,
+                f"🔴 <@{interaction.user.id}> reported: **{club_a}** vs **{club_b}**{score_text} — "
+                f"winner **{winner_club}**{pens_note}.",
+            ),
+        ]
+        if not state["is_test"]:
+            steps.insert(2, lambda: leaderboard_utils.refresh_leaderboard_channel(self.bot, guild))
+        for step in steps:
+            try:
+                await step()
+            except Exception:
+                logging.getLogger("ntf").exception("post-result update failed for match %s", match_id)
 
         await self._maybe_advance_round(guild, session_id)
 
@@ -2086,7 +2208,14 @@ class SessionCog(commands.Cog):
         state.setdefault("result_posts", {})[match["id"]] = message
 
     async def _maybe_advance_round(self, guild, session_id):
-        state = self.active_sessions[session_id]
+        """Moves on once every game in the current round is reported. League
+        plays two games at once, so two results can arrive together; every
+        decision below happens before the first await, and "finished" is set
+        before the final standings start, so a round advances once and the
+        final standings (and the session bonus) happen once (NTF-010)."""
+        state = self.active_sessions.get(session_id)
+        if not state or state.get("finished") or state.get("ending"):
+            return
         all_matches = db.get_matches_for_session(session_id)
         round_no = state["current_round"]
         this_round = [m for m in all_matches if m["round_no"] == round_no]
@@ -2097,6 +2226,7 @@ class SessionCog(commands.Cog):
             state["current_round"] += 1
             await self._post_round(guild, session_id, state["current_round"])
         else:
+            state["finished"] = True
             await self._post_final_standings(guild, session_id, all_matches)
 
     async def _post_final_standings(self, guild, session_id, all_matches):
@@ -2146,10 +2276,16 @@ class SessionCog(commands.Cog):
         # so test sessions never pollute the real history.
         history_channel = None
         if not state["is_test"]:
+            # Eligibility is unchanged: the winning team's roster at the end
+            # (see the report for the open questions on this - NTF-026). The
+            # award itself can only ever happen once per session.
             winning_players = state["teams"][winning_team_id]["on_field"]
-            for pid in winning_players:
-                db.bump_mode_mmr(state["guild_id"], pid, state["mode"], config.SESSION_WIN_BONUS_MMR)
-            db.set_session_winner(session_id, winning_team_id)
+            awarded = db.award_session_win(
+                session_id, winning_team_id, guild_id=state["guild_id"], mode=state["mode"],
+                player_ids=list(winning_players), bonus=config.SESSION_WIN_BONUS_MMR,
+            )
+            if not awarded:
+                logging.getLogger("ntf").warning("session %s winner was already recorded - bonus not given again", session_id)
 
             cfg = db.get_guild_config(state["guild_id"])
             history_channel_id = cfg.get("history_channel_id") if cfg else None
@@ -2501,7 +2637,9 @@ class SessionCog(commands.Cog):
         state = self.active_sessions[session_id]
         old_captain_id = state["teams"][team_id]["captain_id"]
         state["teams"][team_id]["captain_id"] = new_captain_id
-        db.set_captain(state["guild_id"], new_captain_id, True)
+        # NTF-020: captaining this session only. The permanent captain
+        # whitelist (who can be picked as captain in future drafts) is left
+        # alone - admins change that with the whitelist commands.
 
         new_captain = guild.get_member(new_captain_id)
         if new_captain:
@@ -2559,11 +2697,12 @@ class SessionCog(commands.Cog):
     # -------------------------------------------------------------- end
     async def end_session(self, session_id, ended_by: discord.Member = None, natural_completion: bool = False):
         state = self.active_sessions.get(session_id)
-        if not state:
-            return
+        if not state or state.get("ending"):
+            return  # already ending (the auto-close and an admin's End Session can arrive together)
         guild = self.bot.get_guild(state["guild_id"])
         if guild is None:
             return
+        state["ending"] = True
 
         # if a captain/admin manually ends early, cancel the pending 60s auto-close
         task = state.get("auto_close_task")
@@ -2587,7 +2726,10 @@ class SessionCog(commands.Cog):
             if announce_channel:
                 who = ended_by.mention if ended_by else "the system"
                 lines = [f"**{info['club_name']}** — Captain {_captain_display(info['captain_id'])}" for info in state["teams"].values()]
-                await announce_channel.send(f"🔴 **NTF session ended** by {who}.\n" + "\n".join(lines))
+                try:
+                    await announce_channel.send(f"🔴 **NTF session ended** by {who}.\n" + "\n".join(lines))
+                except discord.HTTPException:
+                    logging.getLogger("ntf").warning("session %s end announcement failed", session_id, exc_info=True)
 
         # Voice infrastructure disappears right away either way - that's the
         # actual "ending" of the session. The permanent text channels get
@@ -2620,7 +2762,7 @@ class SessionCog(commands.Cog):
         guild_id = state["guild_id"]
 
         db.end_session(session_id)
-        del self.active_sessions[session_id]
+        self.active_sessions.pop(session_id, None)
 
         # Natural completion already waited 60s (via _auto_close_after_delay)
         # BEFORE calling this method, so the grace period has already
