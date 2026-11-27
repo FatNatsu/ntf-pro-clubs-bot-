@@ -1322,7 +1322,16 @@ class SessionCog(commands.Cog):
         # still gets even teams). Copies - the visible numbers stay untouched.
         draft_pool = [{**p, "mmr": db.balance_rating(guild.id, p["discord_id"], mode)} for p in players]
         built = team_balance.build_teams(draft_pool, num_teams, initial_team_size=initial_team_size, teammate_counts=teammate_counts)
-        club_names = team_balance.pick_random_club_names(db.list_clubs(guild.id), num_teams)
+        # Two sessions at once (two Rivals games, say) never share a club
+        # name: names already in use by a running session in this server are
+        # skipped while there are enough others to choose from.
+        in_use = {
+            info["club_name"] for st in self.active_sessions.values() if st["guild_id"] == guild.id
+            for info in st["teams"].values()
+        }
+        all_clubs = db.list_clubs(guild.id)
+        free_clubs = [c for c in all_clubs if c not in in_use]
+        club_names = team_balance.pick_random_club_names(free_clubs if len(free_clubs) >= num_teams else all_clubs, num_teams)
         captain_ids = [t["captain"]["discord_id"] for t in built]
 
         session_id = db.create_session(guild.id, mode)
