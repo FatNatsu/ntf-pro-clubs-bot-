@@ -113,8 +113,11 @@ sudo systemctl enable --now ntf-backup.timer
 
 Backups go to `~/ntf-data/backups/`, are checked after they're written, and
 the newest 30 of each kind are kept (set `NTF_BACKUP_KEEP` in
-`/etc/ntf-bot.env` to change it). Take one by hand any time with
-`.venv/bin/python backup.py --verify`.
+`/etc/ntf-bot.env` to change it). Take one by hand any time with:
+
+```
+PRO_CLUBS_DB_PATH=~/ntf-data/pro_clubs.db .venv/bin/python backup.py --verify
+```
 
 **Restoring a backup** (only if something went badly wrong):
 

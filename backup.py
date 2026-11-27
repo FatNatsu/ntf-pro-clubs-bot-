@@ -6,6 +6,7 @@ the bot is running and writing. Backups go to NTF_BACKUP_DIR (default: a
 (default 30) are kept per label.
 
     python3 backup.py            # daily backup, run by the systemd timer in deploy/
+                                 # (by hand, set PRO_CLUBS_DB_PATH first - see deploy/ORACLE.md)
     python3 backup.py --verify   # also opens the newest backup and checks it
 
 The bot also calls make_backup("pre-season-reset") before every season reset.
@@ -47,6 +48,11 @@ def make_backup(label: str = "daily") -> str:
     """Copies the live database to a timestamped file, checks the copy and
     removes the oldest copies with the same label past the keep count.
     Returns the new file's path. Raises if the copy fails or doesn't verify."""
+    if not os.path.exists(config.DB_PATH):
+        # never "back up" by creating an empty database somewhere else
+        raise FileNotFoundError(
+            f"no database at {config.DB_PATH} - set PRO_CLUBS_DB_PATH (on the server it's in /etc/ntf-bot.env)"
+        )
     folder = backup_dir()
     os.makedirs(folder, exist_ok=True)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")

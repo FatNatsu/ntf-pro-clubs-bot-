@@ -80,7 +80,7 @@ Additive changes only, run by `init_db` on start after an automatic backup: `mat
 
 ## Backup and rollback
 
-- **Before deploying:** `.venv/bin/python backup.py --verify` on the server. The bot takes another backup by itself when it starts.
+- **Before deploying:** `PRO_CLUBS_DB_PATH=~/ntf-data/pro_clubs.db .venv/bin/python backup.py --verify` on the server. The bot takes another backup by itself when it starts.
 - **Rollback:** `git checkout main`, then `sudo systemctl restart ntf-bot`. The database stays as it is.
 - **Restore a backup** (only if data was damaged): the steps are in `deploy/ORACLE.md`.
 
