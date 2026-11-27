@@ -926,6 +926,26 @@ def create_matches(session_id, rounds):
                 )
 
 
+def add_match(session_id, team_a_id, team_b_id, round_no):
+    """Adds one more fixture to a running session (the decider). Returns its id."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO matches (session_id, team_a_id, team_b_id, round_no) VALUES (?, ?, ?, ?)",
+            (session_id, team_a_id, team_b_id, round_no),
+        )
+        return cur.lastrowid
+
+
+def session_team_players(session_id, team_id):
+    """Everyone who played at least one recorded game for this team in this session."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT player_id FROM match_participants WHERE session_id=? AND team_id=?",
+            (session_id, team_id),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
 def get_matches_for_session(session_id):
     with get_conn() as conn:
         rows = conn.execute(

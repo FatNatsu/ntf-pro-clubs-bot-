@@ -1774,8 +1774,12 @@ class SessionCog(commands.Cog):
         await self._delete_quietly(slot.get("sub_queue_message"))
         slot["panel"], slot["sub_queue_message"] = None, None
 
-        await self._send_with_retry(captains_channel.send, f"**━━━━━━━━━━ ROUND {round_no} ━━━━━━━━━━**")
-        slot["control_title"] = f"Round {round_no} • Match {n}/{total}: {club_a} vs {club_b}"
+        decider = self._is_decider_round(state, round_no)
+        label = "DECIDER" if decider else f"ROUND {round_no}"
+        await self._send_with_retry(captains_channel.send, f"**━━━━━━━━━━ {label} ━━━━━━━━━━**")
+        slot["control_title"] = (
+            f"Decider for 1st: {club_a} vs {club_b}" if decider else f"Round {round_no} • Match {n}/{total}: {club_a} vs {club_b}"
+        )
         control_embed = self._build_control_embed(state, slot)
         match_view = MatchControlView(self, session_id, match["id"], team_a_id, club_a, team_b_id, club_b)
         slot["control_message"] = await self._send_with_retry(
@@ -2268,46 +2272,99 @@ class SessionCog(commands.Cog):
         if round_no < state["total_rounds"]:
             state["current_round"] += 1
             await self._post_round(guild, session_id, state["current_round"])
-        else:
-            state["finished"] = True
-            await self._post_final_standings(guild, session_id, all_matches)
+            return
+
+        # Two teams level for 1st on wins, losses and goal difference play one
+        # more game (Founder decision, 27 Nov 2026). Only ever one decider.
+        tied = None if state.get("decider") else self._tied_for_first(state, all_matches)
+        if tied:
+            a, b = tied
+            state["total_rounds"] += 1
+            state["current_round"] += 1
+            match_id = db.add_match(session_id, a, b, state["current_round"])
+            state["decider"] = {"teams": (a, b), "match_id": match_id, "round_no": state["current_round"]}
+            club_a, club_b = state["teams"][a]["club_name"], state["teams"][b]["club_name"]
+            await self._announce_decider(guild, session_id, club_a, club_b)
+            await self._post_round(guild, session_id, state["current_round"])
+            return
+
+        state["finished"] = True
+        await self._post_final_standings(guild, session_id, all_matches)
+
+    # -------------------------------------------------------------- standings
+    def _standings(self, state, all_matches):
+        """(ranked team ids, wins, losses, goals for, goals against). Ranked by
+        wins, then fewer losses, then goal difference, then goals scored.
+        Shootout goals never count (penalty results store no goals)."""
+        wins = {tid: 0 for tid in state["teams"]}
+        losses = {tid: 0 for tid in state["teams"]}
+        gf = {tid: 0 for tid in state["teams"]}
+        ga = {tid: 0 for tid in state["teams"]}
+        for m in all_matches:
+            winner = m["winner_team_id"]
+            if winner not in wins:
+                continue
+            wins[winner] += 1
+            loser = m["team_b_id"] if winner == m["team_a_id"] else m["team_a_id"]
+            if loser in losses:
+                losses[loser] += 1
+            if m["score_a"] is not None and m["score_b"] is not None:
+                for team, mine, theirs in ((m["team_a_id"], m["score_a"], m["score_b"]), (m["team_b_id"], m["score_b"], m["score_a"])):
+                    if team in gf:
+                        gf[team] += mine
+                        ga[team] += theirs
+        ranked = sorted(state["teams"].keys(), key=lambda t: (-wins[t], losses[t], -(gf[t] - ga[t]), -gf[t]))
+        return ranked, wins, losses, gf, ga
+
+    def _tied_for_first(self, state, all_matches):
+        """The two teams level for 1st on wins, losses and goal difference, or
+        None. Three or more level teams don't get a decider (one game can't
+        settle it); goals scored decides those, then they share 1st."""
+        ranked, wins, losses, gf, ga = self._standings(state, all_matches)
+        key = lambda t: (wins[t], losses[t], gf[t] - ga[t])
+        level = [t for t in ranked if key(t) == key(ranked[0])]
+        return tuple(level) if len(level) == 2 else None
+
+    def _is_decider_round(self, state, round_no) -> bool:
+        decider = state.get("decider")
+        return bool(decider and decider["round_no"] == round_no)
+
+    async def _announce_decider(self, guild, session_id, club_a, club_b):
+        state = self.active_sessions[session_id]
+        text = (
+            f"⚔️ **{club_a} and {club_b} are level for 1st** on wins, losses and goal difference — "
+            f"they play **one more game, the Decider**. The winner takes 1st and the +{config.SESSION_WIN_BONUS_MMR} MMR "
+            f"session bonus. It counts for MMR like any other game. Press ▶️ Match Live at kick-off."
+        )
+        for slot in state["slots"]:
+            for channel_id in (slot["public_channel_id"], slot["captains_channel_id"]):
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    try:
+                        await channel.send(text)
+                    except discord.HTTPException:
+                        logging.getLogger("ntf").warning("decider announcement failed in session %s", session_id)
+        await self._log_action(session_id, f"⚔️ Decider for 1st: **{club_a}** vs **{club_b}**.")
+
+    def _bonus_players(self, session_id, state, team_ids):
+        """Who gets the session bonus (Founder decision, 27 Nov 2026):
+        everyone who played at least one game for a winning team, plus
+        everyone on it when the session ends. Once each."""
+        players = set()
+        for team_id in team_ids:
+            players |= db.session_team_players(session_id, team_id)
+            players |= set(state["teams"][team_id]["on_field"])
+        return players
 
     async def _post_final_standings(self, guild, session_id, all_matches):
         state = self.active_sessions[session_id]
-        wins_by_team = {tid: 0 for tid in state["teams"]}
-        losses_by_team = {tid: 0 for tid in state["teams"]}
-        goals_for = {tid: 0 for tid in state["teams"]}
-        goals_against = {tid: 0 for tid in state["teams"]}
-
-        for m in all_matches:
-            winner = m["winner_team_id"]
-            if winner not in wins_by_team:
-                continue
-            wins_by_team[winner] += 1
-            loser = m["team_b_id"] if winner == m["team_a_id"] else m["team_a_id"]
-            if loser in losses_by_team:
-                losses_by_team[loser] += 1
-
-            score_a, score_b = m["score_a"], m["score_b"]
-            if score_a is not None and score_b is not None:
-                if m["team_a_id"] in goals_for:
-                    goals_for[m["team_a_id"]] += score_a
-                    goals_against[m["team_a_id"]] += score_b
-                if m["team_b_id"] in goals_for:
-                    goals_for[m["team_b_id"]] += score_b
-                    goals_against[m["team_b_id"]] += score_a
-
-        # Ranked by wins, then fewer losses, then goal differential - GD is
-        # what actually separates teams tied on wins/losses since everyone
-        # in a round robin plays the same number of games.
-        team_ids_ranked = sorted(
-            state["teams"].keys(),
-            key=lambda tid: (
-                -wins_by_team[tid],
-                losses_by_team[tid],
-                -(goals_for[tid] - goals_against[tid]),
-            ),
-        )
+        # Ranked by wins, then fewer losses, then goal difference, then goals
+        # scored. Two teams level on the first three already played a
+        # Decider, so here a level top can only be three or more teams still
+        # level on goals scored - they share 1st.
+        team_ids_ranked, wins_by_team, losses_by_team, goals_for, goals_against = self._standings(state, all_matches)
+        full_key = lambda t: (wins_by_team[t], losses_by_team[t], goals_for[t] - goals_against[t], goals_for[t])
+        winners = [t for t in team_ids_ranked if full_key(t) == full_key(team_ids_ranked[0])]
 
         medals = ["🥇", "🥈", "🥉", "4️⃣"]
         winning_team_id = team_ids_ranked[0]
@@ -2322,10 +2379,9 @@ class SessionCog(commands.Cog):
             # Eligibility is unchanged: the winning team's roster at the end
             # (see the report for the open questions on this - NTF-026). The
             # award itself can only ever happen once per session.
-            winning_players = state["teams"][winning_team_id]["on_field"]
             awarded = db.award_session_win(
                 session_id, winning_team_id, guild_id=state["guild_id"], mode=state["mode"],
-                player_ids=list(winning_players), bonus=config.SESSION_WIN_BONUS_MMR,
+                player_ids=sorted(self._bonus_players(session_id, state, winners)), bonus=config.SESSION_WIN_BONUS_MMR,
             )
             if not awarded:
                 logging.getLogger("ntf").warning("session %s winner was already recorded - bonus not given again", session_id)
@@ -2343,9 +2399,9 @@ class SessionCog(commands.Cog):
             losses = losses_by_team[team_id]
             gd = goals_for[team_id] - goals_against[team_id]
             gd_text = f"+{gd}" if gd > 0 else str(gd)
-            medal = medals[i] if i < len(medals) else f"{i + 1}."
+            medal = "🥇" if team_id in winners else (medals[i] if i < len(medals) else f"{i + 1}.")
             bonus_note = ""
-            if team_id == winning_team_id:
+            if team_id in winners:
                 bonus_note = " (test — no bonus applied)" if state["is_test"] else f" (+{config.SESSION_WIN_BONUS_MMR} MMR session bonus)"
             lines.append(
                 f"{medal} **{club}** — {wins}W-{losses}L — GD {gd_text} "
@@ -2362,7 +2418,7 @@ class SessionCog(commands.Cog):
         # score, since the match channels showing them are about to be
         # deleted. Real sessions only - test sessions never reach history.
         if history_channel:
-            winning_club = state["teams"][winning_team_id]["club_name"]
+            winning_club = " and ".join(state["teams"][t]["club_name"] for t in winners)
             winning_captain = state["teams"][winning_team_id]["captain_id"]
             mode_label = "🏆 League" if state["mode"] == "league" else "⚔️ Rivals"
             history_embed = discord.Embed(
@@ -2375,7 +2431,11 @@ class SessionCog(commands.Cog):
                 history_embed.add_field(name="Results", value=results, inline=False)
             try:
                 await history_channel.send(
-                    f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>.",
+                    (
+                        f"**Session #{session_id}** — {mode_label} — **{winning_club}** shared 1st."
+                        if len(winners) > 1 else
+                        f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
+                    ),
                     **ui.send_kwargs("session_history", history_embed),
                 )
             except discord.HTTPException:
@@ -2746,6 +2806,27 @@ class SessionCog(commands.Cog):
         if guild is None:
             return
         state["ending"] = True
+
+        # A Decider that never got played: both teams share 1st and the bonus
+        # (Founder decision, 27 Nov 2026). Real sessions only, and only once.
+        decider = state.get("decider")
+        if decider and not state.get("finished") and not state["is_test"] and not natural_completion:
+            pair = list(decider["teams"])
+            try:
+                if db.award_session_win(
+                    session_id, pair[0], guild_id=state["guild_id"], mode=state["mode"],
+                    player_ids=sorted(self._bonus_players(session_id, state, pair)), bonus=config.SESSION_WIN_BONUS_MMR,
+                ):
+                    clubs = " and ".join(state["teams"][t]["club_name"] for t in pair)
+                    cfg = db.get_guild_config(state["guild_id"]) or {}
+                    history = guild.get_channel(cfg.get("history_channel_id") or 0)
+                    if history:
+                        await history.send(
+                            f"**Session #{session_id}** — the Decider wasn't played, so **{clubs}** shared 1st "
+                            f"(+{config.SESSION_WIN_BONUS_MMR} MMR each)."
+                        )
+            except Exception:
+                logging.getLogger("ntf").exception("shared 1st after an unplayed decider failed for session %s", session_id)
 
         # if a captain/admin manually ends early, cancel the pending 60s auto-close
         task = state.get("auto_close_task")

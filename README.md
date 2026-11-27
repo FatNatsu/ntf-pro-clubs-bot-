@@ -196,6 +196,15 @@ can post this panel; any player can then ready up from it.
     final standings and the +15 session bonus happen once, even when both
     League games finish at the same moment, and a result can't be undone
     after the final standings are in.
+    - **Ranking:** wins, then fewest losses, then goal difference.
+    - **Decider:** if two teams are still level for 1st, they play one more
+      game, the Decider. It counts for MMR like any other game, and the
+      winner takes 1st. If an admin ends the session before it's played,
+      the two teams share 1st.
+    - **Three or more level for 1st** (League only): most goals scored
+      wins; if they're still level, they share 1st.
+    - **Who gets the +15:** everyone who played at least one game for the
+      winning team, plus everyone on it when the session ends, once each.
     The admin panel is removed and the final status stays in the admin log
     as part of the record.
 

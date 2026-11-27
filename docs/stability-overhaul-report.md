@@ -44,7 +44,7 @@ Statuses use the handover's list. "Test" names the file in `tests/`.
 | NTF-023 | Medium | Confirmed and awaiting fix | Logging was added everywhere this branch touched. Many `except HTTPException: pass` remain in `voice_utils.py` and channel setup. | — |
 | NTF-024 | — | Reviewed, no change (Founder 27 Nov) | Consistent with the approved policy: hidden MMR moves with match results, the bonus is visible-only, hidden survives reset, and a missing hidden value falls back to visible. Admins adjust hidden MMR directly with `/hidden_mmr_set` (already exists); visible corrections stay separate. | existing run_hidden |
 | NTF-025 | — | Proposal (not started) | Needs a draft simulation over history. | — |
-| NTF-026 | — | Requires Founder decision | Current behaviour: the bonus goes to the winning team's roster at the end, so a late joiner or a 7th who never played gets it, and someone who played and left doesn't. Ranking is wins, then fewer losses, then GD. **A tie on all three is decided by team order, which is arbitrary.** | — |
+| NTF-026 | — | Confirmed and fixed (Founder decisions 27 Nov) | The +15 now goes to everyone who played at least one game for the winning team plus everyone on it at the end, once each. Two teams level on wins, losses and GD play a Decider (counts for MMR); if it isn't played, they share 1st. Three or more level teams: goals scored, then shared 1st. The old arbitrary team-order tie-break is gone. | run_decider |
 | NTF-027 | — | Founder decided 27 Nov: keep each season's history; plan to confirm | Season reset deletes sessions and matches today. Plan: keep them, tagged with their season; stats stay season-only, as they already are. Not built yet. | — |
 | NTF-028 | High | Confirmed and fixed | Now one reset per server at a time, and the automatic reset carries the season number so a stale one does nothing. Backup first. A reset and a queue turning into a session can't overlap (a reset could have deleted a session mid-build). The 24h warning is only marked sent once it posts. Remaining: the archive post isn't retried (the backup holds the standings), and there's no explicit policy if sessions run back-to-back at season end (it retries every 10 min). | run_season_safety |
 | NTF-029 | High | Confirmed and fixed | Backups use SQLite's online backup API and are integrity-checked, kept 30 per label, taken on every bot start (before `init_db` adds columns) and before every season reset. A daily systemd timer and restore steps are in `deploy/ORACLE.md`. The database already lives outside the repo, foreign keys are on and `*.db` is git-ignored. Remaining: backups sit on the same disk; copy one off now and then. | run_season_safety, migration check |
@@ -117,9 +117,8 @@ One additive change: `ALTER TABLE matches ADD COLUMN went_to_pens INTEGER NOT NU
 
 ## Outstanding Founder decisions
 
-Decided 27 Nov: Match Live required (built), keep each season's history (plan to confirm), admins adjust hidden MMR with `/hidden_mmr_set` (no change), keep moving players who are in voice (no change).
+Decided 27 Nov: Match Live required (built), the Decider and the +15 rule (built), #session-history still wiped each reset, keep each season's history (plan to confirm), admins adjust hidden MMR with `/hidden_mmr_set` (no change), keep moving players who are in voice (no change).
 
-2. **NTF-026:** who gets the +15 (the end roster, as now, or only players who played a game for the winners?), and the tie-break after wins, losses and GD (head-to-head, goals scored, or a shared first place?).
 6. **NTF-008:** full session restore after a restart (bigger), or safe clean-up on start (smaller, done first)?
 7. **Phase 9 proposals** (reliability stats, achievements, longer profiles, positions, an independent hidden rating): which to plan first?
 
