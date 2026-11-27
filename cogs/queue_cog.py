@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import traceback
 from typing import Literal
 
@@ -135,7 +136,50 @@ class QueueCog(commands.Cog):
             "ready": [], "platforms": {}, "message": None, "view": None,
             "countdown_task": None, "timeout_task": None,
             "paused_by": None,  # admin's user id while this mode's queue is paused
+            # Queue states: WAITING (no countdown), COUNTDOWN (countdown_task set),
+            # PAUSED (paused_by set) and STARTING (starting True while one pop
+            # builds the session). Only one pop per mode can be STARTING.
+            "starting": False,
+            "countdown_deadline": None,   # time.monotonic() when the countdown ends
+            "paused_remaining": None,     # seconds left on a countdown that was paused
         })
+
+    def _rostered_session(self, guild_id: int, user_id: int):
+        """The id of a running session this player is on a team in, or None.
+        Bench players and spectators aren't rostered, so they're never blocked."""
+        session_cog = self.bot.get_cog("SessionCog")
+        if not session_cog:
+            return None
+        for session_id, s in getattr(session_cog, "active_sessions", {}).items():
+            if s.get("guild_id") != guild_id:
+                continue
+            if any(user_id in info["on_field"] for info in s["teams"].values()):
+                return session_id
+        return None
+
+    def _cancel_countdown(self, state: dict):
+        """Stops a pending countdown. Never cancels the task that is running
+        this code: a countdown that has finished and is starting the session
+        must not cancel itself on the way (NTF-001)."""
+        task = state.get("countdown_task")
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        state["countdown_task"] = None
+        state["countdown_deadline"] = None
+
+    async def _recheck_countdown(self, guild: discord.Guild, mode: str):
+        """Called after someone leaves a mode. A countdown only keeps running
+        while the queue is still full; otherwise it stops and the queue goes
+        back to waiting. It starts again from the top once the queue refills."""
+        state = self._mode_state(guild.id, mode)
+        if state.get("countdown_task") is not None and len(state["ready"]) < config.QUEUE_CAP[mode]:
+            self._cancel_countdown(state)
+            await self._refresh_ready_message(
+                guild, mode, note="⏳ Someone left, so the countdown stopped. It starts again when the queue is full."
+            )
+            await self._refresh_panel_message(guild.id)
+            return True
+        return False
 
     def _resolve_panel_channel_id(self, guild_id: int):
         """Falls back to the persisted queue_channel_id (set by /ntf_setup)
@@ -165,40 +209,72 @@ class QueueCog(commands.Cog):
     async def ensure_panel_in_channel(self, guild: discord.Guild, channel: discord.TextChannel):
         """Posts (or moves) the queue panel into the given channel. Used by
         both the manual /queue_panel command and the auto-provisioned
-        #ntf-queue channel from /ntf_setup."""
+        #ntf-queue channel from /ntf_setup. Replaces the previous panel this
+        bot is tracking, so running /queue_panel twice leaves one panel."""
+        old = self.panel_message.get(guild.id)
         self.panel_channel[guild.id] = channel.id
         embed = self._build_panel_embed(guild.id)
         message = await channel.send(**ui.send_kwargs("queue", embed), view=QueuePanelView(self))
         self.panel_message[guild.id] = message
+        if old is not None and old.id != message.id:
+            try:
+                await old.delete()
+            except discord.HTTPException:
+                pass
         return message
 
+    def _protected_message_ids(self, guild_id: int) -> set:
+        """Messages in the queue channel that clean-up must never delete: the
+        permanent panel, both modes' live ready checks (including a paused
+        one), and the announcements of sessions that are still running."""
+        protected = set()
+        panel = self.panel_message.get(guild_id)
+        if panel is not None:
+            protected.add(panel.id)
+        for mode in ("rivals", "league"):
+            message = self._mode_state(guild_id, mode).get("message")
+            if message is not None:
+                protected.add(message.id)
+        session_cog = self.bot.get_cog("SessionCog")
+        for s in getattr(session_cog, "active_sessions", {}).values() if session_cog else []:
+            if s.get("guild_id") == guild_id:
+                protected.update(s.get("announce_message_ids", ()))
+        return protected
+
     async def reset_channel(self, guild: discord.Guild):
-        """Wipes #ntf-queue back to a clean slate - called when a session
-        ends, so leftover ready-check/announcement history from that session
-        doesn't linger. Loops the purge since a single call only grabs up to
-        100 messages at a time - a channel with more history than that would
-        otherwise be left partially cleared. Reposts a fresh panel afterward
-        since the old one gets deleted along with everything else."""
+        """Tidies #ntf-queue after a session ends (NTF-007). Deletes only this
+        bot's own messages that nothing still needs - never the live panel,
+        a ready check (paused or counting down), another running session's
+        announcements, pinned messages, or anything a person wrote. Reposts
+        the panel only if it's missing (for example after a restart, when the
+        bot no longer knows which message the panel is)."""
         channel_id = self._resolve_panel_channel_id(guild.id)
         if not channel_id:
             return
         channel = guild.get_channel(channel_id)
         if not channel:
             return
+        bot_id = self.bot.user.id if getattr(self.bot, "user", None) else None
+        if bot_id is None:
+            return
+        protected = self._protected_message_ids(guild.id)
+
+        def removable(message):
+            return message.author.id == bot_id and message.id not in protected and not message.pinned
+
         try:
-            while True:
-                deleted = await channel.purge(limit=100)
-                if len(deleted) < 100:
-                    break
+            await channel.purge(limit=None, check=removable)
         except discord.HTTPException:
-            pass
-        self.panel_message.pop(guild.id, None)
-        await self.ensure_panel_in_channel(guild, channel)
+            log.warning("queue channel clean-up failed in guild %s", guild.id, exc_info=True)
+        panel = self.panel_message.get(guild.id)
+        if panel is None or getattr(panel, "deleted", False) or panel.channel.id != channel.id:
+            self.panel_message.pop(guild.id, None)
+            await self.ensure_panel_in_channel(guild, channel)
 
     def _mode_status_text(self, state: dict) -> str:
         if state.get("paused_by"):
             return "⏸️ Paused"
-        if state.get("countdown_task") is not None:
+        if state.get("countdown_task") is not None or state.get("starting"):
             return "🚀 Starting"
         return "⏳ Waiting"
 
@@ -257,6 +333,9 @@ class QueueCog(commands.Cog):
                 f"Nobody new can ready up while it's paused. The start countdown is stopped, "
                 f"and players who have already readied stay in the queue."
             )
+        elif note is None and state.get("countdown_deadline") is not None:
+            left = max(1, round(state["countdown_deadline"] - time.monotonic()))
+            note = f"🚀 **Queue full! Starting in about {left} seconds...**"
         desc = f"{ui.bar(ready, cap)}  **{ready}/{cap} ready**"
         if note:
             desc = f"{note}\n\n{desc}"
@@ -291,19 +370,21 @@ class QueueCog(commands.Cog):
                 await post_new()
 
     def _reset_mode_state(self, guild_id: int, mode: str):
+        """Empties one mode's queue. Leaves the "starting" flag alone - the
+        pop that is building a session owns it and clears it when done."""
         state = self._mode_state(guild_id, mode)
-        for key in ("countdown_task", "timeout_task"):
-            task = state.get(key)
-            if task and not task.done():
-                task.cancel()
+        self._cancel_countdown(state)
+        task = state.get("timeout_task")
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
         old_message = state["message"]
         state["ready"] = []
         state["platforms"] = {}
         state["message"] = None
         state["view"] = None
-        state["countdown_task"] = None
         state["timeout_task"] = None
         state["paused_by"] = None
+        state["paused_remaining"] = None
         return old_message
 
     # ---------------------------------------------------------- join / ready
@@ -327,10 +408,22 @@ class QueueCog(commands.Cog):
             await interaction.response.send_message("That queue just filled up — wait for the next one!", ephemeral=True)
             return
 
+        # NTF-005: someone already playing on a team in a running session
+        # can't queue for another one at the same time.
+        if user.id not in state["ready"] and self._rostered_session(guild.id, user.id) is not None:
+            await interaction.response.send_message(
+                "You're on a team in a session that's still running, so you can't queue for another one yet. "
+                "Ask your captain or an admin to remove you from that team first if you've left it.",
+                ephemeral=True,
+            )
+            return
+
         if user.id in other_state["ready"]:
             other_state["ready"].remove(user.id)
             other_state["platforms"].pop(user.id, None)
-            await self._refresh_ready_message(guild, other_mode)
+            # switching modes can take the other queue below full mid-countdown
+            if not await self._recheck_countdown(guild, other_mode):
+                await self._refresh_ready_message(guild, other_mode)
 
         if user.id not in state["ready"]:
             state["ready"].append(user.id)
@@ -344,34 +437,47 @@ class QueueCog(commands.Cog):
         await self._refresh_ready_message(guild, mode)
         await self._refresh_panel_message(guild.id)
 
-        if len(state["ready"]) >= config.QUEUE_CAP[mode] and state["countdown_task"] is None and not state.get("paused_by"):
+        if (len(state["ready"]) >= config.QUEUE_CAP[mode] and state["countdown_task"] is None
+                and not state.get("paused_by") and not state.get("starting")):
             await self._begin_countdown(guild, mode)
 
     async def handle_pause(self, interaction: discord.Interaction, mode: str):
         """Admin-only. Pausing freezes ONE mode's queue exactly as it is:
         nobody new can ready up and a running start countdown is stopped,
-        but everyone already readied stays in. Resuming puts it straight
-        back - and if the queue is full, the countdown starts again.
-        League and Rivals pause separately."""
+        but everyone already readied stays in. League and Rivals pause
+        separately.
+
+        Resuming (NTF-004): if the queue is still full, the countdown carries
+        on from where it was paused (at least 5 seconds, so nobody is caught
+        out). If anyone left while it was paused, the queue isn't full any
+        more, so there's no countdown; it starts again from the full 15
+        seconds once the queue refills."""
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("Only an admin can pause or resume the queue.", ephemeral=True)
             return
         guild = interaction.guild
         state = self._mode_state(guild.id, mode)
+        if state.get("starting"):
+            await interaction.response.send_message(
+                f"The {mode.title()} session is already being set up, so the queue can't be paused right now.", ephemeral=True
+            )
+            return
         if state.get("paused_by"):
             state["paused_by"] = None
+            remaining = state.get("paused_remaining")
+            state["paused_remaining"] = None
             await interaction.response.send_message(f"▶️ {mode.title()} queue resumed.", ephemeral=True)
             await self._refresh_ready_message(guild, mode)
             await self._refresh_panel_message(guild.id)
             if len(state["ready"]) >= config.QUEUE_CAP[mode] and state["countdown_task"] is None:
-                await self._begin_countdown(guild, mode)
+                seconds = max(5, round(remaining)) if remaining else config.READY_COUNTDOWN_SECONDS
+                await self._begin_countdown(guild, mode, seconds=min(seconds, config.READY_COUNTDOWN_SECONDS))
             return
 
         state["paused_by"] = interaction.user.id
-        task = state.get("countdown_task")
-        if task and not task.done():
-            task.cancel()
-        state["countdown_task"] = None
+        deadline = state.get("countdown_deadline")
+        state["paused_remaining"] = max(0.0, deadline - time.monotonic()) if deadline is not None else None
+        self._cancel_countdown(state)
         await interaction.response.send_message(
             f"⏸️ {mode.title()} queue paused. Players already readied stay in; press Resume Queue to carry on.",
             ephemeral=True,
@@ -390,8 +496,10 @@ class QueueCog(commands.Cog):
                 removed_from = mode
         if removed_from:
             await interaction.response.send_message("👋 You're no longer readied up.", ephemeral=True)
-            await self._refresh_ready_message(guild, removed_from)
-            await self._refresh_panel_message(guild.id)
+            # NTF-002: leaving mid-countdown stops it if the queue is no longer full
+            if not await self._recheck_countdown(guild, removed_from):
+                await self._refresh_ready_message(guild, removed_from)
+                await self._refresh_panel_message(guild.id)
         else:
             await interaction.response.send_message("You're not in a queue.", ephemeral=True)
 
@@ -409,82 +517,163 @@ class QueueCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------- popping
-    async def _begin_countdown(self, guild: discord.Guild, mode: str):
+    async def _begin_countdown(self, guild: discord.Guild, mode: str, seconds: float = None):
         state = self._mode_state(guild.id, mode)
+        seconds = config.READY_COUNTDOWN_SECONDS if seconds is None else seconds
         task = state.get("timeout_task")
         if task and not task.done():
             task.cancel()
             state["timeout_task"] = None
-        await self._refresh_ready_message(guild, mode, note=f"🚀 **Queue full! Starting in {config.READY_COUNTDOWN_SECONDS} seconds...**")
-        state["countdown_task"] = asyncio.create_task(self._countdown_then_start(guild, mode))
+        state["countdown_deadline"] = time.monotonic() + seconds
+        state["countdown_task"] = asyncio.create_task(self._countdown_then_start(guild, mode, seconds))
+        await self._refresh_ready_message(guild, mode)
         await self._refresh_panel_message(guild.id)
 
-    async def _countdown_then_start(self, guild: discord.Guild, mode: str):
-        await asyncio.sleep(config.READY_COUNTDOWN_SECONDS)
-        state = self._mode_state(guild.id, mode)
-        if not state["ready"]:
-            return  # queue got closed/emptied out from under the countdown
-        snapshot = list(state["ready"])[: config.QUEUE_CAP[mode]]
-        await self._pop_and_start(guild, mode, snapshot)
+    def _drop_rostered(self, guild_id: int, mode: str) -> list:
+        """Takes anyone who has since been put on a team in a running session
+        out of this queue. Returns who was dropped."""
+        state = self._mode_state(guild_id, mode)
+        dropped = [pid for pid in state["ready"] if self._rostered_session(guild_id, pid) is not None]
+        for pid in dropped:
+            state["ready"].remove(pid)
+            state["platforms"].pop(pid, None)
+        return dropped
+
+    async def _countdown_then_start(self, guild: discord.Guild, mode: str, seconds: float):
+        try:
+            await asyncio.sleep(seconds)
+            state = self._mode_state(guild.id, mode)
+            if state.get("countdown_task") is not asyncio.current_task():
+                return  # stopped or replaced while it was sleeping
+            state["countdown_task"] = None
+            state["countdown_deadline"] = None
+            if state.get("paused_by") or state.get("starting"):
+                return
+            # NTF-002: check the queue is still full right before starting.
+            # An undersized session only ever starts through Force Start.
+            self._drop_rostered(guild.id, mode)
+            if len(state["ready"]) < config.QUEUE_CAP[mode]:
+                await self._refresh_ready_message(
+                    guild, mode, note="⏳ The queue isn't full any more, so it didn't start. Waiting for players."
+                )
+                await self._refresh_panel_message(guild.id)
+                return
+            snapshot = list(state["ready"])[: config.QUEUE_CAP[mode]]
+            await self._pop_and_start(guild, mode, snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("queue countdown failed for mode=%s in guild=%s", mode, guild.id)
 
     async def handle_force_start(self, interaction: discord.Interaction, mode: str):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("Only an admin can force start.", ephemeral=True)
             return
         state = self._mode_state(interaction.guild_id, mode)
+        if state.get("starting"):
+            await interaction.response.send_message(f"The {mode.title()} session is already starting.", ephemeral=True)
+            return
         if state.get("paused_by"):
             await interaction.response.send_message("The queue is paused — resume it before force starting.", ephemeral=True)
             return
         minimum = config.FORCE_START_MIN.get(mode)
-        if minimum is None or len(state["ready"]) < minimum:
+        eligible = [pid for pid in state["ready"] if self._rostered_session(interaction.guild_id, pid) is None]
+        if minimum is None or len(eligible) < minimum:
             await interaction.response.send_message(f"Need at least {minimum} ready players to force start.", ephemeral=True)
             return
-        await interaction.response.send_message(f"⚡ Force starting {mode.title()} with {len(state['ready'])} players…", ephemeral=True)
-        snapshot = list(state["ready"])
-        await self._pop_and_start(interaction.guild, mode, snapshot)
+        await interaction.response.send_message(f"⚡ Force starting {mode.title()} with {len(eligible)} players…", ephemeral=True)
+        # everyone who's ready at this moment and not already playing elsewhere
+        snapshot = [pid for pid in state["ready"] if self._rostered_session(interaction.guild_id, pid) is None]
+        if len(snapshot) < minimum:
+            await interaction.followup.send("Someone left while that was going through, so it didn't start.", ephemeral=True)
+            return
+        started = await self._pop_and_start(interaction.guild, mode, snapshot)
+        if started is None:
+            await interaction.followup.send(f"The {mode.title()} session was already starting.", ephemeral=True)
 
     async def _pop_and_start(self, guild: discord.Guild, mode: str, player_ids: list):
-        players = []
-        for pid in player_ids:
-            p = db.get_player(guild.id, pid)
-            if p:
-                mode_stats = db.get_player_mode_stats(guild.id, pid, mode)
-                players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
-
-        session_cog = self.bot.get_cog("SessionCog")
-        old_message = self._reset_mode_state(guild.id, mode)
-        if old_message:
-            try:
-                await old_message.delete()
-            except discord.HTTPException:
-                pass
-        await self._refresh_panel_message(guild.id)
-
-        if session_cog is None:
-            channel_id = self._resolve_panel_channel_id(guild.id)
-            channel = guild.get_channel(channel_id) if channel_id else None
-            if channel:
-                await channel.send("⚠️ Session cog not loaded — cannot start the match.")
-            return
-
-        announce_channel_id = self._resolve_panel_channel_id(guild.id)
+        """The one place a queue turns into a session (NTF-003). Returns True
+        if the session started, False if it failed, or None if another pop for
+        this mode was already starting (the automatic countdown and a Force
+        Start, or two admins pressing Force Start together). If starting the
+        session fails, everyone is put back in the queue and the queue is
+        paused, so nobody loses their place and it can't fail in a loop."""
+        state = self._mode_state(guild.id, mode)
+        if state.get("starting"):
+            return None
+        state["starting"] = True  # set before the first await, so no other pop can slip in
         try:
-            await session_cog.start_session(guild, mode, players, announce_channel_id)
-        except Exception:
-            # A queue pop runs as a background task with nobody watching it -
-            # without this, a failure here is completely silent: the queue
-            # just resets and nothing else happens, with no error anywhere
-            # a human would see it. Log the full traceback AND post visibly
-            # to the channel so this can never fail invisibly again.
-            log.error("Failed to start session for mode=%s in guild=%s:\n%s", mode, guild.id, traceback.format_exc())
+            platforms = {pid: state["platforms"].get(pid, "Console") for pid in player_ids}
+            players = []
+            for pid in player_ids:
+                p = db.get_player(guild.id, pid)
+                if p:
+                    mode_stats = db.get_player_mode_stats(guild.id, pid, mode)
+                    players.append({**p, "mmr": mode_stats["mmr"], "wins": mode_stats["wins"], "losses": mode_stats["losses"]})
+
+            session_cog = self.bot.get_cog("SessionCog")
+            old_message = self._reset_mode_state(guild.id, mode)
+            if old_message:
+                try:
+                    await old_message.delete()
+                except discord.HTTPException:
+                    pass
+            await self._refresh_panel_message(guild.id)
+
             channel_id = self._resolve_panel_channel_id(guild.id)
             channel = guild.get_channel(channel_id) if channel_id else None
-            if channel:
-                await channel.send(
-                    f"🚨 **{mode.title()} queue popped but the session failed to start.** "
-                    f"The queue has been reset - please try again, and let an admin know if this "
-                    f"keeps happening (check the bot's logs for the exact error)."
-                )
+            if session_cog is None:
+                log.error("SessionCog not loaded - cannot start a %s session in guild %s", mode, guild.id)
+                await self._restore_after_failed_start(guild, mode, player_ids, platforms)
+                if channel:
+                    await channel.send("⚠️ Session cog not loaded — cannot start the match. Everyone is back in the queue.")
+                return False
+
+            try:
+                await session_cog.start_session(guild, mode, players, channel_id)
+                return True
+            except Exception:
+                # Logged in full and posted where people can see it, so a
+                # failed start is never silent.
+                log.error("Failed to start session for mode=%s in guild=%s:\n%s", mode, guild.id, traceback.format_exc())
+                restored = await self._restore_after_failed_start(guild, mode, player_ids, platforms)
+                if channel:
+                    try:
+                        await channel.send(
+                            f"🚨 **{mode.title()} queue popped but the session failed to start.** "
+                            f"{restored} player(s) have been put back in the queue, and the queue is paused so it "
+                            f"doesn't fail again straight away. An admin can press **Resume Queue** to try again "
+                            f"(the bot's logs have the exact error)."
+                        )
+                    except discord.HTTPException:
+                        pass
+                return False
+        finally:
+            state["starting"] = False
+
+    async def _restore_after_failed_start(self, guild: discord.Guild, mode: str, player_ids: list, platforms: dict) -> int:
+        """Puts the players from a failed start back at the front of the
+        queue, in their original order, and pauses it. Skips anyone who has
+        joined the other queue since or ended up on a team anyway."""
+        state = self._mode_state(guild.id, mode)
+        other = self._mode_state(guild.id, "league" if mode == "rivals" else "rivals")
+        back = [
+            pid for pid in player_ids
+            if pid not in state["ready"] and pid not in other["ready"] and self._rostered_session(guild.id, pid) is None
+        ]
+        state["ready"] = back + [pid for pid in state["ready"] if pid not in back]
+        for pid in back:
+            state["platforms"][pid] = platforms.get(pid, "Console")
+        self._cancel_countdown(state)
+        bot_user = getattr(self.bot, "user", None)
+        state["paused_by"] = bot_user.id if bot_user else 0
+        state["paused_remaining"] = None
+        try:
+            await self._refresh_ready_message(guild, mode)
+            await self._refresh_panel_message(guild.id)
+        except discord.HTTPException:
+            pass
+        return len(back)
 
     # -------------------------------------------------------------- close
     async def _close_queue(self, guild: discord.Guild, mode: str, reason: str, closed_by: discord.Member = None):

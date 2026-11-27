@@ -1405,21 +1405,29 @@ class SessionCog(commands.Cog):
         if announce_channel:
             extra_note = f" (Started {missing} short of a full queue — late arrivals can join the Bench and be subbed in.)" if missing else ""
             test_note = " 🧪 **TEST SESSION — no MMR, wins/losses, or match history will be recorded.**" if is_test else ""
-            await announce_channel.send(
-                f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
-                f"Captains — your controls are in your match's captains channel."
-            )
-            if failed_moves:
-                # Discord can only move someone who's already connected to a
-                # voice channel somewhere - this can't be forced, so anyone
-                # not already in voice when the queue popped needs to join
-                # their own VC manually rather than silently being left
-                # nowhere with no one aware of it.
-                lines = [f"• <@{pid}> → **{dest}** ({reason})" for pid, dest, reason in failed_moves]
-                await announce_channel.send(
-                    "⚠️ **Couldn't automatically move these players into voice — they'll need to join manually:**\n"
-                    + "\n".join(lines)
+            # remembered so the queue channel clean-up after ANOTHER session
+            # ends never deletes this running session's announcements (NTF-007)
+            announced = session_state.setdefault("announce_message_ids", set())
+            try:
+                started_msg = await announce_channel.send(
+                    f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
+                    f"Captains — your controls are in your match's captains channel."
                 )
+                announced.add(started_msg.id)
+                if failed_moves:
+                    # Discord can only move someone who's already connected to a
+                    # voice channel somewhere - this can't be forced, so anyone
+                    # not already in voice when the queue popped needs to join
+                    # their own VC manually rather than silently being left
+                    # nowhere with no one aware of it.
+                    lines = [f"• <@{pid}> → **{dest}** ({reason})" for pid, dest, reason in failed_moves]
+                    moves_msg = await announce_channel.send(
+                        "⚠️ **Couldn't automatically move these players into voice — they'll need to join manually:**\n"
+                        + "\n".join(lines)
+                    )
+                    announced.add(moves_msg.id)
+            except discord.HTTPException:
+                logging.getLogger("ntf").warning("session %s start announcement failed", session_id, exc_info=True)
 
         await self._log_action(
             session_id,
