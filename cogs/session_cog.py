@@ -893,8 +893,13 @@ class SpectateView(discord.ui.View):
                 await self.cog._sync_spectator_capacity(
                     interaction.guild, state, channel.id, extra=0 if already_here else 1
                 )
+                # NTF-021: someone a moderator had already server-muted stays
+                # muted afterwards - the bot only undoes mutes it applied
+                was_muted = bool(getattr(member.voice, "mute", False)) if member.voice else False
                 moved, reason = await voice_utils.move_member_to_channel(interaction.guild, member.id, channel)
                 if moved:
+                    if previous_channel_id is None and was_muted:
+                        state.setdefault("premuted_spectators", set()).add(member.id)
                     state["spectators"][member.id] = channel.id
                     await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
                     if previous_channel_id is not None and previous_channel_id != channel.id:
@@ -961,7 +966,11 @@ class SessionCog(commands.Cog):
                 watching_channel_id = state["spectators"].get(member.id)
                 after_channel_id = after.channel.id if after.channel else None
                 if watching_channel_id is not None and after_channel_id != watching_channel_id:
-                    await voice_utils.set_spectator_mute(member.guild, member.id, False)
+                    premuted = state.setdefault("premuted_spectators", set())
+                    if member.id in premuted:
+                        premuted.discard(member.id)  # was muted before watching - leave it
+                    else:
+                        await voice_utils.set_spectator_mute(member.guild, member.id, False)
                     del state["spectators"][member.id]
                     # Give back the seat the Watch button borrowed - recomputed
                     # from who's still watching, so it settles at exactly
@@ -2717,8 +2726,10 @@ class SessionCog(commands.Cog):
         # lift any lingering spectator mutes before the channels disappear -
         # a server mute is a per-member flag independent of the channel, so
         # deleting the VC doesn't clear it on its own
+        premuted = state.get("premuted_spectators", set())
         for spectator_id in list(state["spectators"].keys()):
-            await voice_utils.set_spectator_mute(guild, spectator_id, False)
+            if spectator_id not in premuted:
+                await voice_utils.set_spectator_mute(guild, spectator_id, False)
         state["spectators"].clear()
 
         if not natural_completion:

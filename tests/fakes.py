@@ -128,7 +128,9 @@ class Channel:
 class Perm:
     def __init__(self, admin): self.manage_guild = admin
 class Voice:
-    def __init__(self, ch): self.channel = ch
+    def __init__(self, ch, member=None): self.channel = ch; self._member = member
+    @property
+    def mute(self): return bool(self._member and self._member.muted)  # server mute follows the member
 class Member:
     def __init__(self, guild, uid, admin=False):
         self.id = uid; self.guild = guild; self.guild_permissions = Perm(admin)
@@ -140,7 +142,7 @@ class Member:
     def join(self, ch):
         if self.voice and self.voice.channel and self in self.voice.channel.members:
             self.voice.channel.members.remove(self)
-        self.voice = Voice(ch) if ch else None
+        self.voice = Voice(ch, self) if ch else None
         if ch: ch.members.append(self)
     async def move_to(self, ch): self.join(ch)
     async def edit(self, mute=None, **k):
