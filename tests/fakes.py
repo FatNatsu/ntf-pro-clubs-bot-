@@ -213,6 +213,15 @@ def install():
         @staticmethod
         def listener(*a, **k): return _deco()
     cm.Cog = Cog; cm.Bot = Bot; ext.commands = cm; d.ext = ext
+    tk = types.ModuleType("discord.ext.tasks")
+    class _Loop:
+        def __init__(self, fn): self.fn = fn
+        def __get__(self, obj, cls): return self
+        def start(self, *a, **k): pass
+        def cancel(self): pass
+        def before_loop(self, fn): return fn
+    tk.loop = lambda *a, **k: (lambda fn: _Loop(fn))
+    ext.tasks = tk
     sys.modules.update({"discord": d, "discord.ui": ui, "discord.app_commands": ac,
-                        "discord.ext": ext, "discord.ext.commands": cm})
+                        "discord.ext": ext, "discord.ext.commands": cm, "discord.ext.tasks": tk})
     return d

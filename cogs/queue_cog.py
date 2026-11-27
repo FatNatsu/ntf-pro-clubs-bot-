@@ -10,6 +10,7 @@ from discord.ext import commands
 
 import config
 import database as db
+import season
 import ui
 
 log = logging.getLogger("ntf")
@@ -603,6 +604,10 @@ class QueueCog(commands.Cog):
             return None
         state["starting"] = True  # set before the first await, so no other pop can slip in
         try:
+            # never build a session while a season reset is part-way through
+            # (the reset would remove it); wait for the reset to finish
+            while season.resetting(guild.id):
+                await asyncio.sleep(1)
             platforms = {pid: state["platforms"].get(pid, "Console") for pid in player_ids}
             players = []
             for pid in player_ids:

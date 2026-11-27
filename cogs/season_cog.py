@@ -46,23 +46,27 @@ class SeasonCog(commands.Cog):
 
         current = season.info(guild.id)
         if current["seconds_left"] <= 0:
-            result = await season.run_reset(self.bot, guild)
+            result = await season.run_reset(self.bot, guild, expected_number=current["number"])
             if result:
                 log.info("Season %s ended automatically in guild %s", result["ended"], guild.id)
             return  # None = a session is live; try again on the next tick
 
         if current["seconds_left"] <= config.SEASON_WARNING_HOURS * 3600 and not cfg.get("season_warned"):
-            db.upsert_guild_config(guild.id, season_warned=1)
             channel = guild.get_channel(cfg.get("season_archive_channel_id") or 0)
-            if channel:
-                try:
-                    await channel.send(
-                        f"⏳ **Season {current['number']} ends in less than {config.SEASON_WARNING_HOURS} hours.** "
-                        f"MMR, records and sessions reset when it does, and the Golden Crown goes to the player "
-                        f"with the most wins in each mode. Get your last games in."
-                    )
-                except discord.HTTPException:
-                    pass
+            if not channel:
+                db.upsert_guild_config(guild.id, season_warned=1)  # nowhere to post it
+                return
+            try:
+                await channel.send(
+                    f"⏳ **Season {current['number']} ends in less than {config.SEASON_WARNING_HOURS} hours.** "
+                    f"MMR, records and sessions reset when it does, and the Golden Crown goes to the player "
+                    f"with the most wins in each mode. Get your last games in."
+                )
+            except discord.HTTPException:
+                # NTF-028: not marked as sent, so the next check tries again
+                log.warning("season warning failed to post in guild %s; will retry", guild.id)
+                return
+            db.upsert_guild_config(guild.id, season_warned=1)
 
 
 async def setup(bot):

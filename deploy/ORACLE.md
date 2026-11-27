@@ -99,8 +99,34 @@ in the database and are not affected.
 
 ### Backing up player data
 
-Everything is one file: `~/ntf-data/pro_clubs.db`. Copy it somewhere safe
-now and then, for example to your PC:
+Everything is one file: `~/ntf-data/pro_clubs.db`.
+
+**Automatic backups.** The bot takes a backup by itself before every season
+reset. For a daily backup as well, install the timer once (after updating to
+a version that has `backup.py`):
+
+```
+sudo cp deploy/ntf-backup.service deploy/ntf-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ntf-backup.timer
+```
+
+Backups go to `~/ntf-data/backups/`, are checked after they're written, and
+the newest 30 of each kind are kept (set `NTF_BACKUP_KEEP` in
+`/etc/ntf-bot.env` to change it). Take one by hand any time with
+`.venv/bin/python backup.py --verify`.
+
+**Restoring a backup** (only if something went badly wrong):
+
+```
+sudo systemctl stop ntf-bot
+cp ~/ntf-data/pro_clubs.db ~/ntf-data/pro_clubs.before-restore.db
+cp ~/ntf-data/backups/THE-BACKUP-FILE.db ~/ntf-data/pro_clubs.db
+sudo systemctl start ntf-bot
+```
+
+The backups live on the same server, so also copy one to your PC now and
+then, for example:
 
 ```
 scp -i path\to\your-key.key ubuntu@YOUR_SERVER_IP:ntf-data/pro_clubs.db .

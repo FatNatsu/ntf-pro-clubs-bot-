@@ -3,9 +3,11 @@
 the /season_reset command and the automatic reset at the end of the countdown."""
 import asyncio
 import datetime
+import logging
 
 import discord
 
+import backup
 import config
 import database as db
 import leaderboard_utils
@@ -13,6 +15,19 @@ import mmr
 import ui
 
 MODES = (("rivals", "⚔️"), ("league", "🏆"))
+
+log = logging.getLogger("ntf")
+
+# One season reset per server at a time (NTF-028): the automatic reset and an
+# admin's Reset Season button can't both run, and the second one finds the
+# season number already moved on and does nothing.
+_reset_locks: dict = {}
+
+
+def resetting(guild_id: int) -> bool:
+    """True while a season reset is running for this server."""
+    lock = _reset_locks.get(guild_id)
+    return bool(lock and lock.locked())
 
 
 def _now():
@@ -69,19 +84,40 @@ def crown_holder(guild_id: int, mode: str):
     return cfg.get(f"crown_{mode}_id")
 
 
-async def run_reset(bot, guild: discord.Guild):
+async def run_reset(bot, guild: discord.Guild, expected_number: int = None):
     """Ends the season: archives both ladders' top 5 and the Golden Crown
     winners, resets everyone's MMR and records, removes past sessions, clears
     session-history and starts the next season's clock. Returns a short
-    summary dict, or None if a session is still running (nothing changed)."""
+    summary dict, or None if nothing changed (a session is still running, a
+    reset is already happening, or the season it was asked to end has
+    already ended). Takes a database backup first."""
+    lock = _reset_locks.setdefault(guild.id, asyncio.Lock())
+    if lock.locked():
+        return None
+    async with lock:
+        return await _run_reset_locked(bot, guild, expected_number)
+
+
+async def _run_reset_locked(bot, guild: discord.Guild, expected_number):
     guild_id = guild.id
     session_cog = bot.get_cog("SessionCog")
     if session_cog and any(s["guild_id"] == guild_id for s in session_cog.active_sessions.values()):
         return None
+    queue_cog = bot.get_cog("QueueCog")
+    if queue_cog and any(m.get("starting") for m in getattr(queue_cog, "state", {}).get(guild_id, {}).values()):
+        return None  # a queue is turning into a session right now; try again next time
 
     ensure_started(guild_id)
     cfg = db.get_guild_config(guild_id) or {}
     number = cfg.get("season_number") or 1
+    if expected_number is not None and number != expected_number:
+        return None  # that season was already ended by another reset
+
+    # a copy of everything as it was, before anything is reset
+    try:
+        await asyncio.to_thread(backup.make_backup, "pre-season-reset")
+    except Exception:
+        log.exception("backup before the season %s reset failed in guild %s - resetting anyway", number, guild_id)
 
     # the Golden Crown: most wins this season, one per mode
     crowns = {}
@@ -109,7 +145,8 @@ async def run_reset(bot, guild: discord.Guild):
         try:
             await archive_channel.send(**ui.send_kwargs("season_archive", embed))
         except discord.HTTPException:
-            pass
+            # the backup taken above still holds the final standings
+            log.exception("season %s archive post failed in guild %s", number, guild_id)
 
     clubs_reset = 0
     for mode, _emoji in MODES:

@@ -1,0 +1,9 @@
+[Unit]
+Description=NTF bot daily database backup
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ntf-pro-clubs-bot-
+EnvironmentFile=/etc/ntf-bot.env
+ExecStart=/home/ubuntu/ntf-pro-clubs-bot-/.venv/bin/python backup.py --verify

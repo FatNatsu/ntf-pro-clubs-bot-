@@ -33,12 +33,14 @@ class ConfirmSeasonResetView(discord.ui.View):
         # valid for several minutes afterward, not just ~3 seconds.
         await interaction.response.defer(ephemeral=True)
 
-        result = await season.run_reset(self.bot, interaction.guild)
+        already_running = season.resetting(interaction.guild_id)
+        result = None if already_running else await season.run_reset(self.bot, interaction.guild)
         if result is None:
-            await interaction.edit_original_response(
-                content="A session is still running. End it first, then run the season reset again. Nothing was changed.",
-                view=None,
+            reason = (
+                "A season reset is already running." if already_running else
+                "A session is still running. End it first, then run the season reset again."
             )
+            await interaction.edit_original_response(content=f"{reason} Nothing was changed.", view=None)
             return
         crowns = ", ".join(
             f"{mode.title()}: <@{winner['discord_id']}>" for mode, winner in result["crowns"].items() if winner
