@@ -34,7 +34,7 @@ that's your whole database.
 ```
 Creates (or locates, if you rename/move them) the **permanent** channels:
 - the NTF queue channel, where players ready up
-- 🏆 **#leaderboard** — one live-updated leaderboard message, top 20 by MMR
+- 🏆 **#leaderboard** — live-updated leaderboards, top 10 by MMR for each mode
 - 📜 **#session-history**, 🔒 **#admin-log** and 🏅 **#season-archive**
 
 There is no permanent "in-progress" channel any more: while a session runs,
@@ -63,24 +63,30 @@ can post this panel; any player can then ready up from it.
    rules. Admins can **⏸️ Pause Queue** on a mode's ready check: nobody new
    can ready up and a running start countdown stops, but everyone already
    readied stays in (and can still leave). **▶️ Resume Queue** puts it back;
-   if the queue is full the countdown starts again. League and Rivals pause
-   separately.
+   if the queue is still full, the countdown carries on from where it was
+   paused (at least 5 seconds). If anyone left while it was paused, the
+   countdown starts from the top once the queue is full again. League and
+   Rivals pause separately. If a session ever fails to start, everyone is
+   put back in the queue and it pauses itself; an admin presses Resume to
+   try again.
 2. **League** needs 24 ready (4 teams of 6), **Rivals** needs 22 (2 teams
    of 11). The two modes have separate sizes throughout. Once a mode hits its
-   number, a **30-second countdown** starts (last chance to back out) before
-   the bot locks it in.
+   number, a **15-second countdown** starts (last chance to back out) before
+   the bot locks it in. If someone leaves during the countdown it stops, and
+   it starts again when the queue is full. A queue never starts short by
+   itself; only Force Start can do that. Someone who is on a team in a
+   session that's still running can't ready up for another one.
 3. **Force start**: if a queue stalls, an admin can hit **⚡ Force Start**
    on the ready-check message once there are 3 per team — **12+** ready in
    League, **6+** in Rivals. It skips the countdown and starts immediately
    with however many are ready, split evenly (16 in League seats 4 per
    team).
-4. **League auto-close**: if League never reaches 16 within **5 minutes** of
-   the first person readying up, it auto-closes itself and announces it, so
-   the channel doesn't sit clogged with a queue that's never going to pop —
-   players can jump straight into a fresh Rivals queue instead. Admins can
-   also close either queue on demand any time with **`/close_queue
-   mode:<rivals|league>`** — a quick, low-friction way to keep the channel
-   tidy.
+4. **Closing a queue**: admins can close either queue on demand with
+   **`/close_queue mode:<rivals|league>`**. (There is no automatic
+   time-out: a queue stays open until it fills, is force started or is
+   closed.) When a session ends, the queue channel is tidied: the bot
+   removes its own old messages, but never the panel, a live ready check,
+   another running session's posts, pinned messages or anything people wrote.
 5. At pop time, the bot lays the session out as one small category for the
    Bench and then **one category per game** being played at the same time
    (League has two games a round, Rivals one):
@@ -105,7 +111,8 @@ can post this panel; any player can then ready up from it.
    its voice channels, which is why each game has its own category.)
 6. Captains are auto-picked from your whitelist (fills in with the
    highest-MMR remaining players if you don't have enough whitelisted
-   captains queued). Everyone else is snake-drafted by MMR so total team
+   captains queued). Everyone else is placed strongest first, each onto
+   whichever team currently has the lowest total (hidden) MMR, so total team
    strength is as even as possible, and players are dragged straight into
    their team's VC. **Discord can only move people already in some voice
    channel** — get players into voice before the queue pops.
@@ -156,11 +163,14 @@ can post this panel; any player can then ready up from it.
    - A team channel's user limit is the cap **plus** one for every spectator
      watching it and every admin sitting in it who isn't on the team (11
      becomes 13 with two extra), and drops back when they leave.
-10. **MMR updates the moment each result is reported** — Elo-style, with the
-    swing (K-factor) shrinking the higher a player's own rating is: full
-    strength normally, smaller once they're A rank, smallest at S rank —
-    so wins/losses matter less individually near the top and the ladder
-    stays stable. By the time the last match is in, every player's MMR for
+10. **MMR updates the moment each result is reported** — a fixed amount per
+    win or loss that depends on the player's own rank (from +32/0 at G to
+    +10/-24 at S+; the table is `K_FACTORS` in `config.py`), so wins and
+    losses matter less individually near the top and the ladder stays
+    stable. A result is saved in one go (MMR, record, history) and can never
+    be counted twice. Scores are checked: whole numbers from 0 to 99, the
+    winner must be ahead, and a level score has to go through Went to
+    Penalties. By the time the last match is in, every player's MMR for
     the session is already settled. S rank starts at 1,100 MMR and S+ at 1,500.
 11. **Admins** run the session from the **admin log** channel. When a
     session starts the bot posts there: a pinned **live status** message
@@ -177,7 +187,12 @@ can post this panel; any player can then ready up from it.
     record, ranked 🥇🥈🥉 down to last place. That stays up for **60
     seconds**, then every session category (Bench, each game's channels and
     team VCs) is torn down automatically. **#session-history** keeps the
-    permanent record: the winner, the full final table and every score.
+    record for the season: the winner, the full final table and every score
+    (it is cleared, along with past sessions, at each season reset; the
+    season archive and the backups keep the end-of-season standings). The
+    final standings and the +15 session bonus happen once, even when both
+    League games finish at the same moment, and a result can't be undone
+    after the final standings are in.
     The admin panel is removed and the final status stays in the admin log
     as part of the record.
 
@@ -196,7 +211,7 @@ The shared helpers are in `ui.py`.
 
 ```
 /rank [member]                    → rank letter (G→S), MMR, W/L
-/leaderboard                      → top 20 by MMR, your own rank highlighted (shown separately if you're outside the top 20)
+/leaderboard                      → top 10 by MMR for a mode, with the season countdown
 /player_stats [member]            → rank, record, last-10 form, best club, most-played-with teammate
 /club_stats club_name:<name>      → club's record, last-10 form, best win streak, top player for that club
 ```
@@ -286,3 +301,22 @@ starting MMR still gets even teams. It never appears on the leaderboard, in
   lists the top 25.
 - `/hidden_mmr_set member mode value` — set it by hand, for example from an
   old season's leaderboard. Visible MMR and records are not changed.
+
+## Tests
+
+```
+python3 tests/run_all.py
+```
+
+Runs every test in `tests/` against a throwaway database, with a stand-in
+for Discord (`tests/fakes.py`), so it never touches real player data or a
+real server. Run it before every update to the live bot.
+
+## Backups and restarts
+
+- The bot backs the database up by itself before every season reset. A daily
+  backup timer and the restore steps are in `deploy/ORACLE.md`.
+- A running session lives in the bot's memory. Restarting the bot ends it:
+  results already reported are safe in the database, but the session's
+  buttons stop working and its channels are left behind for an admin to
+  delete. Update the bot between sessions.
