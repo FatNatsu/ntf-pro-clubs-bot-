@@ -8,10 +8,12 @@ Requires:  DISCORD_BOT_TOKEN env var (see README.md)
 
 import asyncio
 import logging
+import os
 
 import discord
 from discord.ext import commands
 
+import backup
 import config
 import database as db
 
@@ -37,6 +39,13 @@ class NTFBot(commands.Bot):
         super().__init__(command_prefix="!ntf ", intents=INTENTS, help_command=None)
 
     async def setup_hook(self):
+        # A copy of the database as it was, before init_db adds any new
+        # columns (NTF-029: always back up before a migration).
+        if os.path.exists(config.DB_PATH):
+            try:
+                backup.make_backup("pre-start")
+            except Exception:
+                log.exception("startup backup failed - starting anyway")
         db.init_db()
         for ext in EXTENSIONS:
             await self.load_extension(ext)
