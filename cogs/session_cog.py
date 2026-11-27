@@ -315,6 +315,16 @@ class MatchControlView(discord.ui.View):
             )
         return callback
 
+    async def _refuse_if_not_live(self, interaction: discord.Interaction) -> bool:
+        """Results need Match Live pressed first (Founder decision, 27 Nov
+        2026): everyone can see the game is on, and the rosters are locked
+        for MMR. A paused match has to be resumed before it can be reported."""
+        reason = self.cog.not_live_reason(self.session_id, self.match_id)
+        if reason:
+            await interaction.response.send_message(reason, ephemeral=True)
+            return True
+        return False
+
     def _make_callback(self, winner_id, winner_club, loser_id, loser_club):
         async def callback(interaction: discord.Interaction):
             if not self.cog.is_captain_or_admin(interaction, self.session_id, {self.team_a_id, self.team_b_id}):
@@ -322,6 +332,8 @@ class MatchControlView(discord.ui.View):
                     "Only a captain of one of these two teams (or a server admin) can report this result.",
                     ephemeral=True,
                 )
+                return
+            if await self._refuse_if_not_live(interaction):
                 return
             modal = ScoreModal(
                 self.cog, self.match_id, winner_id, loser_id, winner_club, loser_club,
@@ -337,6 +349,8 @@ class MatchControlView(discord.ui.View):
                     "Only a captain of one of these two teams (or a server admin) can report this result.",
                     ephemeral=True,
                 )
+                return
+            if await self._refuse_if_not_live(interaction):
                 return
             pick_view = PenaltyPickView(
                 self.cog, self.session_id, self.match_id,
@@ -1238,6 +1252,17 @@ class SessionCog(commands.Cog):
             except discord.HTTPException:
                 pass
 
+    def not_live_reason(self, session_id, match_id):
+        """Why this match can't be reported yet, or None if it can."""
+        state = self.active_sessions.get(session_id)
+        if not state:
+            return "This session has ended."
+        if match_id in state.get("match_rosters", {}):
+            return None
+        if match_id in state.get("paused_matches", set()):
+            return "This match is paused. Press ▶️ Resume Match when the game restarts, then report the result."
+        return "Press ▶️ Match Live at kick-off first — it shows everyone the game is on and locks both rosters. Then report the result."
+
     def is_captain_or_admin(self, interaction: discord.Interaction, session_id, team_ids=None):
         state = self.active_sessions.get(session_id)
         if not state:
@@ -2060,6 +2085,15 @@ class SessionCog(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # Match Live is required (checked again here for a popup opened
+        # before the match was paused). An already-reported match falls
+        # through to the duplicate message below instead.
+        if match["status"] != "reported":
+            reason = self.not_live_reason(session_id, match_id)
+            if reason:
+                await interaction.followup.send(f"{reason} Nothing was recorded.", ephemeral=True)
+                return
 
         async def refuse_duplicate():
             # Already reported - a double-click, or a captain and an admin

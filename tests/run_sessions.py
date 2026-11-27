@@ -43,6 +43,12 @@ def slot_of(st, team_id): return next(s for s in st["slots"] if team_id in s["te
 def cap_of(g, st, team_id): return g.get_member(st["teams"][team_id]["captain_id"])
 def cats(g): return [c for c in g.channels.values() if c.kind == "category"]
 
+async def go_live(g, st, mmsg):
+    """Press Match Live as an admin, unless the match is already live."""
+    if mmsg.view.match_id not in st["match_rosters"]:
+        admin = next(m for m in g.members.values() if m.guild_permissions.manage_guild)
+        await mmsg.view.btn_live.callback(fakes.Interaction(g, admin, message=mmsg))
+
 async def join_bench(g, cog, st, uid):
     m = g.get_member(uid); before = vs(m.voice.channel if m.voice else None)
     bench = g.get_channel(st["bench_channel_id"]); m.join(bench)
@@ -174,6 +180,7 @@ async def league():
             mid = slot["match_id"]; a, b = slot["team_ids"]
             capch = g.get_channel(slot["captains_channel_id"])
             mmsg = next(m for m in capch.messages if isinstance(m.view, S.MatchControlView) and m.view.match_id == mid)
+            await go_live(g, st, mmsg)
             await cog.finalize_match(fakes.Interaction(g, x["admin"], message=mmsg), mid, a, b, 2, 1, mmsg.view, mmsg)
         await settle()
     for pub in pubs:

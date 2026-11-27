@@ -8,7 +8,7 @@ import sqlite3
 
 def control(g, st, slot):
     capch = g.get_channel(slot["captains_channel_id"])
-    mmsg = next(m for m in capch.messages if isinstance(m.view, S.MatchControlView))
+    mmsg = next(m for m in capch.messages if isinstance(m.view, S.MatchControlView) and m.view.match_id == slot["match_id"])
     return mmsg, mmsg.view
 
 
@@ -47,6 +47,24 @@ async def main():
     assert "not a captain" in it.last and db.get_match(m1)["status"] == "pending"
     # ---- NTF-020: and the stand-in captain did NOT join the permanent whitelist
     assert not db.get_player(g.id, new_cap)["is_captain"]
+
+    # ---- Match Live is required (Founder decision 27 Nov): not live -> refused, paused -> refused
+    it = fakes.Interaction(g, x["admin"], message=msg1); await v1.btn_a.callback(it)
+    assert "Match Live" in it.last and it.modal is None
+    it = fakes.Interaction(g, x["admin"], message=msg1); await v1.btn_pens.callback(it)
+    assert "Match Live" in it.last
+    it = fakes.Interaction(g, x["admin"], message=msg1); await cog.finalize_match(it, m1, a, b, 2, 0, v1, msg1)
+    assert "Match Live" in it.last and db.get_match(m1)["status"] == "pending"
+    await go_live(g, st, msg1)
+    await v1.btn_pause.callback(fakes.Interaction(g, x["admin"], message=msg1))
+    it = fakes.Interaction(g, x["admin"], message=msg1); await cog.finalize_match(it, m1, a, b, 2, 0, v1, msg1)
+    assert "paused" in it.last and db.get_match(m1)["status"] == "pending"
+    it = fakes.Interaction(g, x["admin"], message=msg1); await v1.btn_a.callback(it)
+    assert "Resume Match" in it.last
+    await go_live(g, st, msg1)   # Resume Match
+    it = fakes.Interaction(g, x["admin"], message=msg1); await v1.btn_a.callback(it)
+    assert isinstance(it.modal, S.ScoreModal)  # live again -> the score popup opens
+    await go_live(g, st, msg2)
 
     # ---- NTF-009: the result is all-or-nothing. Break the participants insert halfway.
     before = {p: stats(g, p, "league")["mmr"] for p in st["teams"][a]["on_field"] | st["teams"][b]["on_field"]}
@@ -91,10 +109,13 @@ async def main():
         for slot in st["slots"]:
             mmsg, mv = control(g, st, slot)
             ta, tb = slot["team_ids"]
+            await go_live(g, st, mmsg)
             await cog.finalize_match(fakes.Interaction(g, x["admin"], message=mmsg), slot["match_id"], ta, tb, 1, 0, mv, mmsg)
         await settle()
         assert st["current_round"] == r + 1
     finals = [(slot, *control(g, st, slot)) for slot in st["slots"]]
+    for slot, mmsg, mv in finals:
+        await go_live(g, st, mmsg)
     pre = {p: stats(g, p, "league")["mmr"] for t in st["teams"].values() for p in t["on_field"]}
     await asyncio.gather(*[
         cog.finalize_match(fakes.Interaction(g, x["admin"], message=mmsg), slot["match_id"], *slot["team_ids"], 3, 1, mv, mmsg)

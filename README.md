@@ -119,6 +119,9 @@ can post this panel; any player can then ready up from it.
 7. In each game's **captains channel**, a round starts with a
    **`━━━ ROUND N ━━━`** divider, then that fixture's panel: **▶️ Match
    Live** at kick-off, then two big red buttons to report the winner.
+   **Match Live has to be pressed before a result can be reported**: it
+   tells everyone the game is on and locks both rosters for MMR. A paused
+   match has to be resumed first.
    Tapping a side pops up a scoreline prompt, then locks the result in —
    winner turns 👑 green, both buttons disable. If players lag out and the
    game has to be restarted, either captain (or an admin) presses
