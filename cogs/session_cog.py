@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import alerts
 import config
 import database as db
 import mmr
@@ -921,6 +922,8 @@ class SpectateView(discord.ui.View):
                     if previous_channel_id is None and was_muted:
                         state.setdefault("premuted_spectators", set()).add(member.id)
                     state["spectators"][member.id] = channel.id
+                    if member.id not in state.get("premuted_spectators", set()):
+                        db.add_bot_mute(interaction.guild.id, member.id, self.session_id)
                     await voice_utils.set_spectator_mute(interaction.guild, member.id, True)
                     if previous_channel_id is not None and previous_channel_id != channel.id:
                         # switched straight from another team's Watch button
@@ -954,6 +957,66 @@ class SessionCog(commands.Cog):
         self.bot = bot
         # session_id -> runtime state (teams, matches progress, channel ids)
         self.active_sessions: dict[int, dict] = {}
+        self._recovered = False
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # on_ready also fires after a reconnect - only recover once per start
+        if self._recovered:
+            return
+        self._recovered = True
+        for guild in list(self.bot.guilds):
+            try:
+                await self.recover_unfinished_sessions(guild)
+            except Exception:
+                logging.getLogger("ntf").exception("restart recovery failed in guild %s", guild.id)
+
+    async def recover_unfinished_sessions(self, guild: discord.Guild) -> list:
+        """NTF-008, safe recovery. A running session lives in the bot's
+        memory, so a restart cuts it off: its buttons stop working and its
+        channels are left behind. On start, every session the database still
+        has as running (but the bot doesn't) is closed safely:
+        - results already reported stay exactly as they are (they're saved
+          the moment they're reported) - nothing is added, reversed or redone;
+        - only that session's own categories are deleted, each one checked
+          against the ids saved when it was made and the session name prefix;
+        - spectator mutes the bot applied are lifted;
+        - the admin log gets a note of what happened.
+        The session bonus isn't given, because the session didn't finish.
+        Returns the ids of the sessions closed."""
+        closed = []
+        for row in db.unfinished_sessions(guild.id, exclude=set(self.active_sessions)):
+            session_id = row["id"]
+            number = row["season_session_no"] or session_id
+            removed = 0
+            for category_id in row["category_ids"]:
+                category = guild.get_channel(category_id)
+                is_ours = (
+                    category is not None
+                    and isinstance(category, discord.CategoryChannel)
+                    and (category.name or "").startswith(f"{config.SESSION_CATEGORY_PREFIX} #")
+                )
+                if is_ours:
+                    await voice_utils.teardown_session_category(guild, category)
+                    removed += 1
+            unmuted = 0
+            for user_id in db.bot_mutes_for_session(session_id):
+                if await voice_utils.set_spectator_mute(guild, user_id, False):
+                    unmuted += 1
+            db.clear_bot_mutes(session_id)
+            db.end_session(session_id)
+            reported = db.count_reported_matches(session_id)
+            closed.append(session_id)
+            await alerts.notify_admins(
+                guild,
+                f"⚠️ **The bot restarted while Session #{number} ({row['mode'].title()}) was running**, so that session "
+                f"has been closed. {reported} result(s) reported before the restart are saved and count. "
+                f"{removed} session categor{'y' if removed == 1 else 'ies'} removed"
+                + (f", {unmuted} spectator mute(s) lifted" if unmuted else "")
+                + ". No session bonus was given because it didn't finish. Start a new session to carry on.",
+            )
+            logging.getLogger("ntf").warning("closed session %s cut off by a restart in guild %s", session_id, guild.id)
+        return closed
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -991,6 +1054,7 @@ class SessionCog(commands.Cog):
                         premuted.discard(member.id)  # was muted before watching - leave it
                     else:
                         await voice_utils.set_spectator_mute(member.guild, member.id, False)
+                        db.remove_bot_mute(member.guild.id, member.id)
                     del state["spectators"][member.id]
                     # Give back the seat the Watch button borrowed - recomputed
                     # from who's still watching, so it settles at exactly
@@ -1532,6 +1596,7 @@ class SessionCog(commands.Cog):
         }
 
         session_state = self.active_sessions[session_id]
+        db.set_session_categories(session_id, session_state["category_ids"])
         # a full pop can start with every team already at its cap (Rivals at 22)
         await self._sync_bench_visibility(guild, session_state)
 
@@ -2733,6 +2798,9 @@ class SessionCog(commands.Cog):
             if bench_channel and member:
                 await voice_utils.allow_member_in_channel(bench_channel, member, connect=False)
 
+            # their old team's call is closed to them now (NTF-019)
+            await self._sync_member_access(guild, state, player_id)
+
             club_name = state["teams"][dest_team_id]["club_name"]
             came_from = f" from **{state['teams'][from_team_id]['club_name']}**" if from_team_id is not None else ""
             note = f" ⚠️ {stripped_captaincy_of} needs a new captain" if stripped_captaincy_of else ""
@@ -2743,15 +2811,77 @@ class SessionCog(commands.Cog):
 
             return True, moved, reason
 
+    # -------------------------------------------------------------- voice access
+    _ACCESS_KEYS = ("view_channel", "connect", "move_members")
+
+    async def _apply_overwrite(self, channel, member, want) -> bool:
+        """Sets one member's overwrite on a channel to exactly `want` (a dict,
+        or None to remove it), skipping the call when it's already right so
+        Discord's rate limits aren't spent for nothing."""
+        current = channel.overwrites.get(member) if hasattr(channel, "overwrites") else None
+        have = None if current is None else tuple(getattr(current, k, None) for k in self._ACCESS_KEYS)
+        need = None if want is None else tuple(want.get(k) for k in self._ACCESS_KEYS)
+        if have == need or (need is None and have is None):
+            return True
+        try:
+            if want is None:
+                await channel.set_permissions(member, overwrite=None)
+            else:
+                await channel.set_permissions(member, **want)
+            return True
+        except discord.HTTPException:
+            logging.getLogger("ntf").warning(
+                "couldn't update voice access for %s on channel %s", member.id, getattr(channel, "id", "?"), exc_info=True
+            )
+            return False
+
+    async def _sync_member_access(self, guild, state, member_id) -> bool:
+        """NTF-019: one place that works out what a member should be able to
+        do in this session's voice channels, from who they are right now:
+        - a captain (of any team): join and move people in every team call and the Bench;
+        - a player on a team: join their own team's call; locked out of the Bench;
+        - watching a team (spectator): join that call;
+        - anyone else (removed, transferred away): no special access left.
+        Admins and ghost-whitelisted members are never touched - their access
+        comes from the server or the ghost list, not from the session.
+        Returns False if Discord refused any change (it's logged)."""
+        member = guild.get_member(member_id)
+        if member is None or member.guild_permissions.manage_guild:
+            return True
+        if any(g["discord_id"] == member_id for g in db.get_ghosts(guild.id)):
+            return True
+        captain = any(t["captain_id"] == member_id for t in state["teams"].values())
+        team_of = next((tid for tid, t in state["teams"].items() if member_id in t["on_field"]), None)
+        watching = state["spectators"].get(member_id)
+        ok = True
+        for team_id, info in state["teams"].items():
+            channel = guild.get_channel(info["voice_channel_id"])
+            if channel is None:
+                continue
+            if captain:
+                want = {"view_channel": True, "connect": True, "move_members": True}
+            elif team_id == team_of or channel.id == watching:
+                want = {"view_channel": True, "connect": True}
+            else:
+                want = None
+            ok = await self._apply_overwrite(channel, member, want) and ok
+        bench = guild.get_channel(state["bench_channel_id"])
+        if bench is not None:
+            if captain:
+                want = {"view_channel": True, "connect": True, "move_members": True}
+            elif team_of is not None:
+                want = {"view_channel": True, "connect": False}
+            else:
+                want = None
+            ok = await self._apply_overwrite(bench, member, want) and ok
+        return ok
+
     # -------------------------------------------------------------- captain reassignment
     async def reassign_captain(self, guild: discord.Guild, session_id: int, team_id: int, new_captain_id: int):
         """Hands captain status to someone else already on that team's
         roster - grants them the same Move Members access every captain has
-        across ALL team VCs and the Bench, plus view/send on session-control.
-        The outgoing captain's access is left as-is rather than revoked, so
-        nothing risks breaking mid-session over a permission removal - the
-        only thing that actually changes for match-reporting purposes is
-        which captain_id is authorized to report results for this team."""
+        across ALL team VCs and the Bench, plus their game's captains channel.
+        The outgoing captain goes back to a normal player's access."""
         state = self.active_sessions[session_id]
         old_captain_id = state["teams"][team_id]["captain_id"]
         state["teams"][team_id]["captain_id"] = new_captain_id
@@ -2759,24 +2889,12 @@ class SessionCog(commands.Cog):
         # whitelist (who can be picked as captain in future drafts) is left
         # alone - admins change that with the whitelist commands.
 
-        new_captain = guild.get_member(new_captain_id)
-        if new_captain:
-            for other_info in state["teams"].values():
-                team_channel = guild.get_channel(other_info["voice_channel_id"])
-                if team_channel:
-                    await voice_utils.allow_member_in_channel(team_channel, new_captain, connect=True)
-                    try:
-                        await team_channel.set_permissions(new_captain, view_channel=True, connect=True, move_members=True)
-                    except discord.HTTPException:
-                        pass
-            bench_channel = guild.get_channel(state["bench_channel_id"])
-            if bench_channel:
-                try:
-                    await bench_channel.set_permissions(new_captain, view_channel=True, connect=True, move_members=True)
-                except discord.HTTPException:
-                    pass
-            # their game's captains channel is opened to them by
-            # _refresh_team_roster below (via _sync_captains_access)
+        # The new captain gets captain access everywhere; the old one goes
+        # back to a normal player's access (NTF-019). Their game's captains
+        # channel is handled by _refresh_team_roster below.
+        await self._sync_member_access(guild, state, new_captain_id)
+        if old_captain_id and old_captain_id != new_captain_id:
+            await self._sync_member_access(guild, state, old_captain_id)
 
         club_name = state["teams"][team_id]["club_name"]
         self._note_team_event(state, {team_id}, f"🎖️ <@{new_captain_id}> is now captaining **{club_name}**")
@@ -2802,10 +2920,8 @@ class SessionCog(commands.Cog):
         if was_captain:
             info["captain_id"] = None
 
-        member = guild.get_member(player_id)
-        bench_channel = guild.get_channel(state["bench_channel_id"])
-        if bench_channel and member:
-            await voice_utils.allow_member_in_channel(bench_channel, member, connect=True)
+        # no team call access left; the Bench is open to them again (NTF-019)
+        await self._sync_member_access(guild, state, player_id)
 
         club_name = info["club_name"]
         note = " ⚠️ they were captain — a new one is needed" if was_captain else ""
@@ -2861,6 +2977,7 @@ class SessionCog(commands.Cog):
             if spectator_id not in premuted:
                 await voice_utils.set_spectator_mute(guild, spectator_id, False)
         state["spectators"].clear()
+        db.clear_bot_mutes(session_id)
 
         if not natural_completion:
             announce_channel = guild.get_channel(state["announce_channel_id"])

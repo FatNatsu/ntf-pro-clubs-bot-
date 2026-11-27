@@ -7,6 +7,7 @@ import logging
 
 import discord
 
+import alerts
 import backup
 import config
 import database as db
@@ -118,6 +119,7 @@ async def _run_reset_locked(bot, guild: discord.Guild, expected_number):
         await asyncio.to_thread(backup.make_backup, "pre-season-reset")
     except Exception:
         log.exception("backup before the season %s reset failed in guild %s - resetting anyway", number, guild_id)
+        await alerts.notify_admins(guild, f"⚠️ The backup before the Season {number} reset failed. The reset went ahead; check the server's disk space.")
 
     # the Golden Crown: most wins this season, one per mode
     crowns = {}
@@ -145,8 +147,9 @@ async def _run_reset_locked(bot, guild: discord.Guild, expected_number):
         try:
             await archive_channel.send(**ui.send_kwargs("season_archive", embed))
         except discord.HTTPException:
-            # the backup taken above still holds the final standings
+            # the backup and the saved season records still hold the final standings
             log.exception("season %s archive post failed in guild %s", number, guild_id)
+            await alerts.notify_admins(guild, f"⚠️ Season {number} ended but its archive post failed. Its final records are saved (Season menu on profiles).")
 
     # this season's final records and crowns are kept for the profile Season menu
     db.archive_season(guild_id, number, {mode: (crowns[mode]["discord_id"] if crowns[mode] else None) for mode, _e in MODES})

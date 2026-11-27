@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import alerts
 import config
 import database as db
 import season
@@ -199,6 +200,23 @@ class QueueCog(commands.Cog):
 
     async def cog_load(self):
         self.bot.add_view(QueuePanelView(self))
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """After a restart the old ready checks have dead buttons and the bot
+        no longer knows which message is the panel. Tidy each queue channel
+        once (only the bot's own messages) and post a fresh panel."""
+        if getattr(self, "_tidied", False):
+            return
+        self._tidied = True
+        for guild in list(self.bot.guilds):
+            cfg = db.get_guild_config(guild.id) or {}
+            if not cfg.get("queue_channel_id"):
+                continue
+            try:
+                await self.reset_channel(guild)
+            except Exception:
+                log.exception("queue channel tidy after restart failed in guild %s", guild.id)
 
     # -------------------------------------------------------------- panel
     @app_commands.command(name="queue_panel", description="[Admin] Post the NTF queue panel here — players ready up themselves")
@@ -642,6 +660,11 @@ class QueueCog(commands.Cog):
                 # failed start is never silent.
                 log.error("Failed to start session for mode=%s in guild=%s:\n%s", mode, guild.id, traceback.format_exc())
                 restored = await self._restore_after_failed_start(guild, mode, player_ids, platforms)
+                await alerts.notify_admins(
+                    guild,
+                    f"🚨 **A {mode.title()} session failed to start.** {restored} player(s) are back in the queue and it's "
+                    f"paused. Press Resume Queue on the ready check to try again. The bot's log has the error.",
+                )
                 if channel:
                     try:
                         await channel.send(

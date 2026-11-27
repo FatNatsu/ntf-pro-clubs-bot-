@@ -338,7 +338,18 @@ real server. Run it before every update to the live bot.
 
 - The bot backs the database up by itself before every season reset. A daily
   backup timer and the restore steps are in `deploy/ORACLE.md`.
-- A running session lives in the bot's memory. Restarting the bot ends it:
-  results already reported are safe in the database, but the session's
-  buttons stop working and its channels are left behind for an admin to
-  delete. Update the bot between sessions.
+- A running session lives in the bot's memory, so restarting the bot ends
+  it. When the bot starts again it tidies up by itself: the cut-off
+  session's channels are removed (only that session's, checked by their
+  saved ids and name), spectator mutes it applied are lifted, results
+  already reported stay saved and count, and the admin log gets a note. No
+  session bonus is given for a session that didn't finish. The queue
+  channel is tidied and gets a fresh panel. Still best to update between
+  sessions.
+- `/ntf_status` (admins, only you see it): sessions running, both queues,
+  the newest backup and the last errors. Important failures (a session that
+  won't start, a failed backup or season archive, a restart mid-session)
+  are also posted in the admin log.
+- Voice access follows the roster: a transferred or removed player loses
+  their old team's call, and a replaced captain goes back to normal player
+  access. Admins and ghosts are never changed.

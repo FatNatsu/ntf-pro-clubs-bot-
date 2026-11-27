@@ -13,12 +13,14 @@ import os
 import discord
 from discord.ext import commands
 
+import alerts
 import backup
 import config
 import database as db
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ntf")
+alerts.install()  # keeps the last errors for /ntf_status
 
 INTENTS = discord.Intents.default()
 INTENTS.members = True         # needed to resolve display names / look up members

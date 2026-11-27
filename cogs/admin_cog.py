@@ -1,9 +1,14 @@
 import asyncio
+import os
+import time
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 from typing import Literal
 
+import alerts
+import backup
 import config
 import database as db
 import mmr
@@ -352,6 +357,59 @@ class AdminCog(commands.Cog):
             f"({mmr_module.rank_for_mmr(new_mmr)}).",
             ephemeral=True,
         )
+
+    @app_commands.command(name="ntf_status", description="[Admin] Privately check the bot: sessions, queues, backups and recent errors")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def ntf_status(self, interaction: discord.Interaction):
+        """NTF-031: a quick health check, only visible to the admin who asks."""
+        guild_id = interaction.guild_id
+        embed = discord.Embed(title="🩺 NTF status", color=ui.accent("neutral"))
+        up = int(time.time() - alerts.STARTED_AT)
+        embed.description = f"Running for **{up // 3600}h {(up % 3600) // 60}m** · Season **{db.current_season(guild_id)}**"
+
+        session_cog = self.bot.get_cog("SessionCog")
+        sessions = [
+            (sid, st) for sid, st in (session_cog.active_sessions.items() if session_cog else [])
+            if st["guild_id"] == guild_id
+        ]
+        lines = [
+            f"#{db.session_number(sid)} {st['mode'].title()} — round {st['current_round']}/{st['total_rounds']}"
+            + (" · finishing" if st.get("finished") else "")
+            for sid, st in sessions
+        ]
+        embed.add_field(name=f"Sessions running ({len(sessions)})", value="\n".join(lines) or "*none*", inline=False)
+
+        queue_cog = self.bot.get_cog("QueueCog")
+        qlines = []
+        for mode in ("rivals", "league"):
+            qs = queue_cog._mode_state(guild_id, mode) if queue_cog else {}
+            state = (
+                "paused" if qs.get("paused_by") else "starting" if qs.get("starting")
+                else "counting down" if qs.get("countdown_task") else "waiting"
+            )
+            qlines.append(f"{mode.title()}: {len(qs.get('ready', []))}/{config.QUEUE_CAP[mode]} ready · {state}")
+        embed.add_field(name="Queues", value="\n".join(qlines), inline=False)
+
+        try:
+            folder = backup.backup_dir()
+            files = sorted((f for f in os.listdir(folder) if f.endswith(".db")), key=lambda f: os.path.getmtime(os.path.join(folder, f)))
+            if files:
+                age = int(time.time() - os.path.getmtime(os.path.join(folder, files[-1])))
+                backup_text = f"Newest: `{files[-1]}` ({age // 3600}h {(age % 3600) // 60}m ago) · {len(files)} kept"
+            else:
+                backup_text = "⚠️ No backups yet"
+        except OSError:
+            backup_text = "⚠️ No backup folder yet"
+        embed.add_field(name="Backups", value=backup_text, inline=False)
+
+        recent = list(alerts.errors.recent)[-5:]
+        err_lines = [f"<t:{int(t)}:R> {msg}" for t, msg in reversed(recent)]
+        embed.add_field(
+            name=f"Errors since start ({alerts.errors.count})",
+            value=("\n".join(err_lines) or "*none*")[:1024],
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="hidden_mmr", description="[Admin] Privately view hidden MMR - one player, or the top 25 in a mode")
     @app_commands.checks.has_permissions(manage_guild=True)

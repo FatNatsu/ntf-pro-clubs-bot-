@@ -149,6 +149,15 @@ CREATE TABLE IF NOT EXISTS season_records (
     PRIMARY KEY (guild_id, season_number, discord_id, mode)
 );
 
+-- Server mutes the bot applied to spectators, so they can be lifted after a
+-- restart (the bot's memory of who it muted is lost when it restarts).
+CREATE TABLE IF NOT EXISTS bot_mutes (
+    guild_id        INTEGER NOT NULL,
+    user_id         INTEGER NOT NULL,
+    session_id      INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
 -- The Golden Crown winner of every season, per mode.
 CREATE TABLE IF NOT EXISTS season_crowns (
     guild_id        INTEGER NOT NULL,
@@ -236,6 +245,7 @@ def init_db():
         # being deleted at the season reset. season_session_no is the number
         # people see ("Session #3"), which starts from 1 every season.
         for table, column in (("sessions", "season_number INTEGER"), ("sessions", "season_session_no INTEGER"),
+                              ("sessions", "category_ids TEXT"),
                               ("match_participants", "season_number INTEGER"), ("club_match_results", "season_number INTEGER")):
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
@@ -903,6 +913,58 @@ def create_session(guild_id: int, mode: str) -> int:
             (guild_id, mode, season, number),
         )
         return cur.lastrowid
+
+
+def set_session_categories(session_id, category_ids):
+    """Remembers every category a session created, so a session cut off by
+    a restart can have exactly its own channels removed (NTF-008)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE sessions SET category_ids=? WHERE id=?", (",".join(str(c) for c in category_ids), session_id))
+
+
+def unfinished_sessions(guild_id: int, exclude=()):
+    """Sessions still marked active in the database that aren't running in
+    the bot's memory - after a restart, these were cut off."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, mode, category_id, category_ids, season_session_no FROM sessions WHERE guild_id=? AND status='active'",
+            (guild_id,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        if r["id"] in exclude:
+            continue
+        d = dict(r)
+        d["category_ids"] = [int(c) for c in (r["category_ids"] or "").split(",") if c.strip().isdigit()]
+        if not d["category_ids"] and r["category_id"]:
+            d["category_ids"] = [r["category_id"]]
+        out.append(d)
+    return out
+
+
+def count_reported_matches(session_id) -> int:
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM matches WHERE session_id=? AND status='reported'", (session_id,)).fetchone()[0]
+
+
+def add_bot_mute(guild_id: int, user_id: int, session_id: int):
+    with get_conn() as conn:
+        conn.execute("INSERT OR REPLACE INTO bot_mutes (guild_id, user_id, session_id) VALUES (?, ?, ?)", (guild_id, user_id, session_id))
+
+
+def remove_bot_mute(guild_id: int, user_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM bot_mutes WHERE guild_id=? AND user_id=?", (guild_id, user_id))
+
+
+def bot_mutes_for_session(session_id) -> list:
+    with get_conn() as conn:
+        return [r[0] for r in conn.execute("SELECT user_id FROM bot_mutes WHERE session_id=?", (session_id,)).fetchall()]
+
+
+def clear_bot_mutes(session_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM bot_mutes WHERE session_id=?", (session_id,))
 
 
 def session_number(session_id) -> int:

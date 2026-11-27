@@ -30,6 +30,9 @@ class File:
     def __init__(self, path, filename=None): self.path, self.filename = path, filename
 class PermissionOverwrite:
     def __init__(self, **k): self.k = dict(k)
+    def __getattr__(self, n):
+        if n == "k": raise AttributeError(n)
+        return self.k.get(n)
 class SelectOption:
     def __init__(self, label=None, value=None, **k): self.label, self.value = label, value
 
@@ -53,7 +56,12 @@ class Modal:
 class TextInput:
     def __init__(self, **k): self.value = k.get("default", "")
 def _deco(*a, **k):
-    def w(f): return f
+    def w(f):
+        try:
+            f.autocomplete = lambda *a2, **k2: (lambda g: g)  # slash-command options
+        except AttributeError:
+            pass
+        return f
     return w
 
 async def _net():
