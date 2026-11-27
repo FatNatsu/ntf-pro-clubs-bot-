@@ -134,6 +134,29 @@ CREATE TABLE IF NOT EXISTS player_mode_stats (
     losses          INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, discord_id, mode)
 );
+
+-- Each player's record at the end of every season, per mode (written by the
+-- season reset just before visible stats go back to the start). Powers the
+-- Season menu on player profiles.
+CREATE TABLE IF NOT EXISTS season_records (
+    guild_id        INTEGER NOT NULL,
+    season_number   INTEGER NOT NULL,
+    discord_id      INTEGER NOT NULL,
+    mode            TEXT NOT NULL,
+    mmr             INTEGER NOT NULL,
+    wins            INTEGER NOT NULL,
+    losses          INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, season_number, discord_id, mode)
+);
+
+-- The Golden Crown winner of every season, per mode.
+CREATE TABLE IF NOT EXISTS season_crowns (
+    guild_id        INTEGER NOT NULL,
+    season_number   INTEGER NOT NULL,
+    mode            TEXT NOT NULL,
+    discord_id      INTEGER,
+    PRIMARY KEY (guild_id, season_number, mode)
+);
 """
 
 
@@ -208,6 +231,36 @@ def init_db():
             conn.execute("ALTER TABLE matches ADD COLUMN went_to_pens INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Season history (Founder decision, 27 Nov 2026): every session, match
+        # result and club result is tagged with its season and kept, instead of
+        # being deleted at the season reset. season_session_no is the number
+        # people see ("Session #3"), which starts from 1 every season.
+        for table, column in (("sessions", "season_number INTEGER"), ("sessions", "season_session_no INTEGER"),
+                              ("match_participants", "season_number INTEGER"), ("club_match_results", "season_number INTEGER")):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        # Rows from before this change all belong to the season running now
+        # (earlier seasons were deleted by the old reset). Sessions keep their
+        # old number, which the old reset already restarted every season.
+        conn.execute(
+            "UPDATE sessions SET season_number = COALESCE((SELECT season_number FROM guild_config g "
+            "WHERE g.guild_id = sessions.guild_id), 1) WHERE season_number IS NULL"
+        )
+        conn.execute("UPDATE sessions SET season_session_no = id WHERE season_session_no IS NULL")
+        conn.execute(
+            "UPDATE match_participants SET season_number = COALESCE("
+            "(SELECT s.season_number FROM sessions s WHERE s.id = match_participants.session_id), "
+            "(SELECT season_number FROM guild_config g WHERE g.guild_id = match_participants.guild_id), 1) "
+            "WHERE season_number IS NULL"
+        )
+        conn.execute(
+            "UPDATE club_match_results SET season_number = COALESCE("
+            "(SELECT s.season_number FROM matches m JOIN sessions s ON s.id = m.session_id WHERE m.id = club_match_results.match_id), "
+            "(SELECT season_number FROM guild_config g WHERE g.guild_id = club_match_results.guild_id), 1) "
+            "WHERE season_number IS NULL"
+        )
         try:
             conn.execute("ALTER TABLE guild_config ADD COLUMN history_channel_id INTEGER")
         except sqlite3.OperationalError:
@@ -621,47 +674,79 @@ def reset_leaderboard(guild_id: int):
 
 
 def reset_sessions(guild_id: int):
-    """Season reset: removes every session this guild has played -
-    the sessions, their teams, matches and per-player/per-club results - so
-    the new season starts from session #1 again. Every session row goes,
-    including ones still marked active: the caller has already checked no
-    session is really running, so those are leftovers from a bot restart
-    mid-session. The season-archive posts (season winners) live in Discord,
-    not here, and are not touched. Returns how many sessions were removed."""
+    """Season reset: past sessions are KEPT, tagged with their season
+    (Founder decision, 27 Nov 2026 - each season keeps its own history).
+    Sessions still marked active are leftovers from a bot restart mid-session
+    (the caller has already checked nothing is really running), so they're
+    marked ended. Returns how many sessions the ending season had."""
+    season = current_season(guild_id)
     with get_conn() as conn:
-        ids = [r[0] for r in conn.execute(
-            "SELECT id FROM sessions WHERE guild_id=?", (guild_id,)
-        ).fetchall()]
-        if ids:
-            marks = ",".join("?" * len(ids))
-            conn.execute(
-                f"DELETE FROM team_members WHERE team_id IN (SELECT id FROM teams WHERE session_id IN ({marks}))", ids
-            )
-            conn.execute(
-                f"DELETE FROM club_match_results WHERE match_id IN (SELECT id FROM matches WHERE session_id IN ({marks}))", ids
-            )
-            conn.execute(f"DELETE FROM match_participants WHERE session_id IN ({marks})", ids)
-            conn.execute(f"DELETE FROM matches WHERE session_id IN ({marks})", ids)
-            conn.execute(f"DELETE FROM teams WHERE session_id IN ({marks})", ids)
-            conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", ids)
-        # session numbers are shared by every server this bot is in, so the
-        # count restarts from the highest number still in use (1 if none)
-        highest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM sessions").fetchone()[0]
-        conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='sessions'", (highest,))
-        return len(ids)
+        conn.execute("UPDATE sessions SET status='ended' WHERE guild_id=? AND status='active'", (guild_id,))
+        return conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE guild_id=? AND season_number=?", (guild_id, season)
+        ).fetchone()[0]
 
 
 def reset_club_records(guild_id: int, mode: str):
-    """Season reset for clubs in ONE mode only - the other mode's club
-    records are untouched (and so is best run / recent form, since those are
-    derived from the same rows), matching how player MMR resets per mode.
-    The club NAME pool itself (/club add /club remove) is untouched - this
-    only clears the match history behind /club_stats for this mode. Returns
-    how many rows were deleted."""
+    """Season reset for clubs in one mode: club results are kept with their
+    season and /club_stats simply shows the new season, so nothing is
+    deleted. Returns how many club results the ending season had."""
     with get_conn() as conn:
-        cur = conn.execute("DELETE FROM club_match_results WHERE guild_id=? AND mode=?", (guild_id, mode))
-        return cur.rowcount
+        return conn.execute(
+            "SELECT COUNT(*) FROM club_match_results WHERE guild_id=? AND mode=? AND season_number=?",
+            (guild_id, mode, current_season(guild_id)),
+        ).fetchone()[0]
 
+
+def archive_season(guild_id: int, season: int, crowns: dict):
+    """Saves every player's end-of-season record (per mode, players who
+    played at least one game) and the Golden Crown winners, before the
+    season reset puts visible stats back to the start. Safe to run twice."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO season_records (guild_id, season_number, discord_id, mode, mmr, wins, losses) "
+            "SELECT guild_id, ?, discord_id, mode, mmr, wins, losses FROM player_mode_stats "
+            "WHERE guild_id=? AND discord_id>0 AND wins + losses > 0",
+            (season, guild_id),
+        )
+        for mode, discord_id in crowns.items():
+            conn.execute(
+                "INSERT OR REPLACE INTO season_crowns (guild_id, season_number, mode, discord_id) VALUES (?, ?, ?, ?)",
+                (guild_id, season, mode, discord_id),
+            )
+
+
+def past_seasons(guild_id: int, discord_id: int = None) -> list:
+    """Ended seasons, newest first - only ones this player played in, if given."""
+    with get_conn() as conn:
+        if discord_id is None:
+            rows = conn.execute(
+                "SELECT DISTINCT season_number FROM season_crowns WHERE guild_id=? ORDER BY season_number DESC", (guild_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT season_number FROM season_records WHERE guild_id=? AND discord_id=? ORDER BY season_number DESC",
+                (guild_id, discord_id),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+
+def season_record(guild_id: int, season: int, discord_id: int, mode: str):
+    """A player's end-of-season record in one mode, or None if they didn't play."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT mmr, wins, losses FROM season_records WHERE guild_id=? AND season_number=? AND discord_id=? AND mode=?",
+            (guild_id, season, discord_id, mode),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def season_crown(guild_id: int, season: int, mode: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT discord_id FROM season_crowns WHERE guild_id=? AND season_number=? AND mode=?", (guild_id, season, mode)
+        ).fetchone()
+        return row[0] if row else None
 
 def add_wins(guild_id: int, discord_id: int, amount: int):
     """Adds to a player's win count directly, without touching MMR - for
@@ -805,11 +890,26 @@ def list_clubs(guild_id: int):
 # ---------------------------------------------------------------------------
 
 def create_session(guild_id: int, mode: str) -> int:
+    """Creates a session in the current season. Its season_session_no (the
+    number people see) counts up from 1 within each season."""
+    season = current_season(guild_id)
     with get_conn() as conn:
+        number = conn.execute(
+            "SELECT COALESCE(MAX(season_session_no), 0) + 1 FROM sessions WHERE guild_id=? AND season_number=?",
+            (guild_id, season),
+        ).fetchone()[0]
         cur = conn.execute(
-            "INSERT INTO sessions (guild_id, mode) VALUES (?, ?)", (guild_id, mode)
+            "INSERT INTO sessions (guild_id, mode, season_number, season_session_no) VALUES (?, ?, ?, ?)",
+            (guild_id, mode, season, number),
         )
         return cur.lastrowid
+
+
+def session_number(session_id) -> int:
+    """The number people see for a session ("Session #3" of its season)."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT season_session_no FROM sessions WHERE id=?", (session_id,)).fetchone()
+        return (row[0] if row and row[0] else session_id)
 
 
 def set_session_channels(session_id, category_id=None, bench_id=None, control_id=None, progress_id=None):
@@ -849,21 +949,21 @@ def get_session_history(guild_id, limit=10, mode=None):
     with get_conn() as conn:
         if mode:
             rows = conn.execute(
-                "SELECT s.id, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
+                "SELECT s.id, s.season_session_no, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
                 "FROM sessions s "
                 "JOIN teams t ON s.winning_team_id = t.id "
-                "WHERE s.guild_id=? AND s.status='ended' AND s.mode=? "
+                "WHERE s.guild_id=? AND s.status='ended' AND s.mode=? AND s.season_number=? "
                 "ORDER BY s.created_at DESC LIMIT ?",
-                (guild_id, mode, limit),
+                (guild_id, mode, current_season(guild_id), limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT s.id, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
+                "SELECT s.id, s.season_session_no, s.mode, s.created_at, t.club_name AS winning_club, t.captain_id AS winning_captain "
                 "FROM sessions s "
                 "JOIN teams t ON s.winning_team_id = t.id "
-                "WHERE s.guild_id=? AND s.status='ended' "
+                "WHERE s.guild_id=? AND s.status='ended' AND s.season_number=? "
                 "ORDER BY s.created_at DESC LIMIT ?",
-                (guild_id, limit),
+                (guild_id, current_season(guild_id), limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -987,6 +1087,8 @@ def record_match_result(match_id, winner_team_id, score_a, score_b, went_to_pens
         if not record_stats:
             return True
         winner_ids = set(team_a_player_ids if a_won else team_b_player_ids)
+        season_row = conn.execute("SELECT season_number FROM sessions WHERE id=?", (session_id,)).fetchone()
+        season = season_row[0] if season_row and season_row[0] else current_season(guild_id)
         hidden = "hidden_mmr=MAX(0, COALESCE(hidden_mmr, mmr) + (? - mmr))"
         for pid, value in new_mmr.items():
             conn.execute(
@@ -1001,13 +1103,13 @@ def record_match_result(match_id, winner_team_id, score_a, score_b, went_to_pens
         for team_id, club, ids, won in ((team_a_id, club_a, team_a_player_ids, a_won), (team_b_id, club_b, team_b_player_ids, not a_won)):
             for pid in ids:
                 conn.execute(
-                    "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (guild_id, match_id, session_id, pid, team_id, club, "win" if won else "loss", mmr_deltas.get(pid, 0), mode),
+                    "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode, season_number) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (guild_id, match_id, session_id, pid, team_id, club, "win" if won else "loss", mmr_deltas.get(pid, 0), mode, season),
                 )
             conn.execute(
-                "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
-                (guild_id, match_id, club, "win" if won else "loss", mode),
+                "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode, season_number) VALUES (?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, club, "win" if won else "loss", mode, season),
             )
         return True
 
@@ -1109,32 +1211,31 @@ def record_match_participants(guild_id, match_id, session_id, team_a_id, team_b_
     it precisely rather than guessing. Defaults to 0 if not given."""
     mmr_deltas = mmr_deltas or {}
     with get_conn() as conn:
+        season_row = conn.execute("SELECT season_number FROM sessions WHERE id=?", (session_id,)).fetchone()
+        season = season_row[0] if season_row and season_row[0] else current_season(guild_id)
         for pid in team_a_player_ids:
             conn.execute(
-                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, match_id, session_id, pid, team_a_id, club_a, "win" if a_won else "loss", mmr_deltas.get(pid, 0), mode),
+                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode, season_number) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, session_id, pid, team_a_id, club_a, "win" if a_won else "loss", mmr_deltas.get(pid, 0), mode, season),
             )
         for pid in team_b_player_ids:
             conn.execute(
-                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win", mmr_deltas.get(pid, 0), mode),
+                "INSERT INTO match_participants (guild_id, match_id, session_id, player_id, team_id, club_name, result, mmr_delta, mode, season_number) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, session_id, pid, team_b_id, club_b, "loss" if a_won else "win", mmr_deltas.get(pid, 0), mode, season),
             )
-        conn.execute(
-            "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
-            (guild_id, match_id, club_a, "win" if a_won else "loss", mode),
-        )
-        conn.execute(
-            "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode) VALUES (?, ?, ?, ?, ?)",
-            (guild_id, match_id, club_b, "loss" if a_won else "win", mode),
-        )
+        for club, won in ((club_a, a_won), (club_b, not a_won)):
+            conn.execute(
+                "INSERT INTO club_match_results (guild_id, match_id, club_name, result, mode, season_number) VALUES (?, ?, ?, ?, ?, ?)",
+                (guild_id, match_id, club, "win" if won else "loss", mode, season),
+            )
 
 
-def get_player_recent_form(guild_id, player_id, mode, limit=10):
+def get_player_recent_form(guild_id, player_id, mode, limit=10, season=None):
     """Most recent results first in this specific mode, e.g. ['W','W','L','W'].
     Only counts results from after this guild's last season reset, if any."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         rows = conn.execute(
             f"SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? {season_clause} ORDER BY id DESC LIMIT ?",
@@ -1143,14 +1244,14 @@ def get_player_recent_form(guild_id, player_id, mode, limit=10):
         return ["W" if r["result"] == "win" else "L" for r in rows]
 
 
-def get_player_streak(guild_id, player_id, mode):
+def get_player_streak(guild_id, player_id, mode, season=None):
     """Returns (streak_type, count) for this player in this mode specifically
     - streak_type is 'W' or 'L', count is how many consecutive results of
     that type they currently have, walking back from their most recent
     match in this mode (only counting results after the last season reset,
     if any). Returns (None, 0) if they have no match history in this mode
     yet (or none since the reset)."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         rows = conn.execute(
             f"SELECT result FROM match_participants WHERE guild_id=? AND player_id=? AND mode=? {season_clause} ORDER BY id DESC",
@@ -1181,17 +1282,17 @@ def set_season_boundary(guild_id: int):
     upsert_guild_config(guild_id, season_started_at=datetime.datetime.utcnow().isoformat(" "))
 
 
-def _season_filter(guild_id: int):
-    """Returns (sql_clause, params_tuple) for filtering match_participants
-    queries to only results after this guild's last season reset - an
-    empty clause/no params if it's never been reset. Splice sql_clause
-    directly into a WHERE ... AND clause and extend query params with
-    params_tuple."""
-    cfg = get_guild_config(guild_id)
-    boundary = cfg.get("season_started_at") if cfg else None
-    if not boundary:
-        return "", ()
-    return "AND created_at > ?", (boundary,)
+def current_season(guild_id: int) -> int:
+    """The season running now (1 before the first reset)."""
+    cfg = get_guild_config(guild_id) or {}
+    return cfg.get("season_number") or 1
+
+
+def _season_filter(guild_id: int, season: int = None):
+    """Returns (sql_clause, params_tuple) that limits a match_participants
+    query to one season - the current one unless season is given. Splice
+    sql_clause into a WHERE ... AND clause and extend the params."""
+    return "AND season_number = ?", (season or current_season(guild_id),)
 
 
 def get_teammate_pair_counts(guild_id: int, discord_ids: list):
@@ -1207,8 +1308,8 @@ def get_teammate_pair_counts(guild_id: int, discord_ids: list):
     with get_conn() as conn:
         rows = conn.execute(
             f"SELECT match_id, team_id, player_id FROM match_participants "
-            f"WHERE guild_id=? AND player_id IN ({placeholders})",
-            (guild_id, *discord_ids),
+            f"WHERE guild_id=? AND season_number=? AND player_id IN ({placeholders})",
+            (guild_id, current_season(guild_id), *discord_ids),
         ).fetchall()
 
     groups = {}
@@ -1225,7 +1326,7 @@ def get_teammate_pair_counts(guild_id: int, discord_ids: list):
     return pair_counts
 
 
-def get_head_to_head(guild_id, player_a_id, player_b_id):
+def get_head_to_head(guild_id, player_a_id, player_b_id, season=None):
     """Returns (a_wins, b_wins, total_meetings) counting only matches where
     these two players were on OPPOSING teams (teammate matches don't count
     as a head-to-head result for either of them)."""
@@ -1235,8 +1336,8 @@ def get_head_to_head(guild_id, player_a_id, player_b_id):
             "FROM match_participants mp_a "
             "JOIN match_participants mp_b "
             "  ON mp_a.match_id = mp_b.match_id AND mp_a.team_id != mp_b.team_id "
-            "WHERE mp_a.guild_id=? AND mp_a.player_id=? AND mp_b.player_id=?",
-            (guild_id, player_a_id, player_b_id),
+            "WHERE mp_a.guild_id=? AND mp_a.player_id=? AND mp_b.player_id=? AND mp_a.season_number=?",
+            (guild_id, player_a_id, player_b_id, season or current_season(guild_id)),
         ).fetchall()
     a_wins = sum(1 for r in rows if r["a_result"] == "win")
     b_wins = sum(1 for r in rows if r["a_result"] == "loss")
@@ -1271,10 +1372,10 @@ def get_player_record(guild_id, player_id):
         return {"wins": row["wins"] or 0, "losses": row["losses"] or 0}
 
 
-def get_player_best_club(guild_id, player_id):
+def get_player_best_club(guild_id, player_id, season=None):
     """Club this player has the most WINS with (min 1 win), counting only
     results since the last season reset, if any."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         row = conn.execute(
             f"SELECT club_name, COUNT(*) AS wins FROM match_participants "
@@ -1284,28 +1385,28 @@ def get_player_best_club(guild_id, player_id):
         return dict(row) if row else None
 
 
-def get_player_most_played_with(guild_id, player_id):
+def get_player_most_played_with(guild_id, player_id, season=None):
     """Teammate this player has shared a team_id/match with most often,
     counting only results since the last season reset, if any."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         row = conn.execute(
             f"SELECT mp2.player_id AS teammate_id, COUNT(*) AS games "
             f"FROM match_participants mp1 "
             f"JOIN match_participants mp2 "
             f"  ON mp1.match_id = mp2.match_id AND mp1.team_id = mp2.team_id AND mp1.player_id != mp2.player_id "
-            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('season_number', 'mp1.season_number')} "
             f"GROUP BY mp2.player_id ORDER BY games DESC LIMIT 1",
             (guild_id, player_id, *season_params),
         ).fetchone()
         return dict(row) if row else None
 
 
-def get_player_best_teammate(guild_id, player_id):
+def get_player_best_teammate(guild_id, player_id, season=None):
     """Teammate this player has WON the most games alongside this season
     (ties: fewer games together, so the better win rate). None without a
     shared win. Returns {teammate_id, wins, games}."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         row = conn.execute(
             f"SELECT mp2.player_id AS teammate_id, "
@@ -1313,18 +1414,18 @@ def get_player_best_teammate(guild_id, player_id):
             f"FROM match_participants mp1 "
             f"JOIN match_participants mp2 "
             f"  ON mp1.match_id = mp2.match_id AND mp1.team_id = mp2.team_id AND mp1.player_id != mp2.player_id "
-            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('season_number', 'mp1.season_number')} "
             f"GROUP BY mp2.player_id HAVING wins > 0 ORDER BY wins DESC, games ASC LIMIT 1",
             (guild_id, player_id, *season_params),
         ).fetchone()
         return dict(row) if row else None
 
 
-def get_player_most_losses_with(guild_id, player_id):
+def get_player_most_losses_with(guild_id, player_id, season=None):
     """Teammate this player has LOST the most games alongside this season
     (ties: fewer games together, so the worse win rate). None without a
     shared loss. Returns {teammate_id, losses, games}."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         row = conn.execute(
             f"SELECT mp2.player_id AS teammate_id, "
@@ -1332,17 +1433,17 @@ def get_player_most_losses_with(guild_id, player_id):
             f"FROM match_participants mp1 "
             f"JOIN match_participants mp2 "
             f"  ON mp1.match_id = mp2.match_id AND mp1.team_id = mp2.team_id AND mp1.player_id != mp2.player_id "
-            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('season_number', 'mp1.season_number')} "
             f"GROUP BY mp2.player_id HAVING losses > 0 ORDER BY losses DESC, games ASC LIMIT 1",
             (guild_id, player_id, *season_params),
         ).fetchone()
         return dict(row) if row else None
 
 
-def get_player_rival(guild_id, player_id):
+def get_player_rival(guild_id, player_id, season=None):
     """Opponent this player has LOST to the most this season (ties: more
     games against them). None without a loss. Returns {opponent_id, losses, games}."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         row = conn.execute(
             f"SELECT mp2.player_id AS opponent_id, "
@@ -1350,7 +1451,7 @@ def get_player_rival(guild_id, player_id):
             f"FROM match_participants mp1 "
             f"JOIN match_participants mp2 "
             f"  ON mp1.match_id = mp2.match_id AND mp1.team_id != mp2.team_id "
-            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('created_at', 'mp1.created_at')} "
+            f"WHERE mp1.guild_id=? AND mp1.player_id=? {season_clause.replace('season_number', 'mp1.season_number')} "
             f"GROUP BY mp2.player_id HAVING losses > 0 ORDER BY losses DESC, games DESC LIMIT 1",
             (guild_id, player_id, *season_params),
         ).fetchone()
@@ -1363,8 +1464,8 @@ def get_club_record(guild_id, club_name, mode):
             "SELECT "
             "SUM(CASE WHEN result='win' THEN 1 ELSE 0 END) AS wins, "
             "SUM(CASE WHEN result='loss' THEN 1 ELSE 0 END) AS losses "
-            "FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=?",
-            (guild_id, club_name, mode),
+            "FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? AND season_number=?",
+            (guild_id, club_name, mode, current_season(guild_id)),
         ).fetchone()
         return {"wins": row["wins"] or 0, "losses": row["losses"] or 0}
 
@@ -1372,8 +1473,8 @@ def get_club_record(guild_id, club_name, mode):
 def get_club_recent_form(guild_id, club_name, mode, limit=10):
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? ORDER BY id DESC LIMIT ?",
-            (guild_id, club_name, mode, limit),
+            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? AND season_number=? ORDER BY id DESC LIMIT ?",
+            (guild_id, club_name, mode, current_season(guild_id), limit),
         ).fetchall()
         return ["W" if r["result"] == "win" else "L" for r in rows]
 
@@ -1384,8 +1485,8 @@ def get_club_streak(guild_id, club_name, mode):
     recorded results in this mode yet."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? ORDER BY id DESC",
-            (guild_id, club_name, mode),
+            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? AND season_number=? ORDER BY id DESC",
+            (guild_id, club_name, mode, current_season(guild_id)),
         ).fetchall()
     if not rows:
         return None, 0
@@ -1403,8 +1504,8 @@ def get_club_best_run(guild_id, club_name, mode):
     """Longest consecutive win streak in chronological order, for this mode specifically."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? ORDER BY id ASC",
-            (guild_id, club_name, mode),
+            "SELECT result FROM club_match_results WHERE guild_id=? AND club_name=? AND mode=? AND season_number=? ORDER BY id ASC",
+            (guild_id, club_name, mode, current_season(guild_id)),
         ).fetchall()
     best = current = 0
     for r in rows:
@@ -1416,10 +1517,10 @@ def get_club_best_run(guild_id, club_name, mode):
     return best
 
 
-def get_club_top_player(guild_id, club_name):
+def get_club_top_player(guild_id, club_name, season=None):
     """The player with the most WINS for this club (min 1 win), counting
     only results since the last season reset, if any."""
-    season_clause, season_params = _season_filter(guild_id)
+    season_clause, season_params = _season_filter(guild_id, season)
     with get_conn() as conn:
         row = conn.execute(
             f"SELECT player_id, COUNT(*) AS wins FROM match_participants "

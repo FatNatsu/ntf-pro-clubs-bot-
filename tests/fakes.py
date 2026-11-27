@@ -208,7 +208,13 @@ def install():
         def __init__(s, *a, **k): pass
         def __call__(s, *a, **k): return _deco()
         def __getattr__(s, n): return _Any()
-    ac.command = _deco; ac.describe = _deco; ac.choices = _deco; ac.checks = _Any(); ac.Choice = _Any(); ac.Group = _Any
+    def _command(*a, **k):
+        def w(f):
+            f.autocomplete = lambda *a2, **k2: (lambda g: g)
+            f.error = lambda g: g
+            return f
+        return w
+    ac.command = _command; ac.describe = _deco; ac.choices = _deco; ac.checks = _Any(); ac.Choice = _Any(); ac.Group = _Any
     d.app_commands = ac
     ext = types.ModuleType("discord.ext"); cm = types.ModuleType("discord.ext.commands")
     class Cog:

@@ -47,8 +47,8 @@ class ConfirmSeasonResetView(discord.ui.View):
         ) or "nobody (no games were won)"
         await interaction.edit_original_response(
             content=f"✅ **Season {result['ended']} reset** — every player's MMR (both Rivals and League) is back to "
-                    f"{config.STARTING_MMR} with a clean record, {result['clubs_reset']} club result(s) were cleared "
-                    f"and {result['sessions_removed']} past session(s) were removed. 👑 Golden Crown: {crowns}. "
+                    f"{config.STARTING_MMR} with a clean record. Season {result['ended']}'s {result['sessions_removed']} session(s) "
+                    f"and {result['clubs_reset']} club result(s) are kept in its history (pick it from the Season menu on a profile). 👑 Golden Crown: {crowns}. "
                     f"Season {result['ended'] + 1} has started and ends in {config.SEASON_LENGTH_DAYS} days.",
             view=None,
         )

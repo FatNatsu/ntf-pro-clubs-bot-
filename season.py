@@ -148,6 +148,9 @@ async def _run_reset_locked(bot, guild: discord.Guild, expected_number):
             # the backup taken above still holds the final standings
             log.exception("season %s archive post failed in guild %s", number, guild_id)
 
+    # this season's final records and crowns are kept for the profile Season menu
+    db.archive_season(guild_id, number, {mode: (crowns[mode]["discord_id"] if crowns[mode] else None) for mode, _e in MODES})
+
     clubs_reset = 0
     for mode, _emoji in MODES:
         db.reset_mode_leaderboard(guild_id, mode)

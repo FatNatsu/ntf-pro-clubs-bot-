@@ -45,7 +45,7 @@ Statuses use the handover's list. "Test" names the file in `tests/`.
 | NTF-024 | — | Reviewed, no change (Founder 27 Nov) | Consistent with the approved policy: hidden MMR moves with match results, the bonus is visible-only, hidden survives reset, and a missing hidden value falls back to visible. Admins adjust hidden MMR directly with `/hidden_mmr_set` (already exists); visible corrections stay separate. | existing run_hidden |
 | NTF-025 | — | Proposal (not started) | Needs a draft simulation over history. | — |
 | NTF-026 | — | Confirmed and fixed (Founder decisions 27 Nov) | The +15 now goes to everyone who played at least one game for the winning team plus everyone on it at the end, once each. Two teams level on wins, losses and GD play a Decider (counts for MMR); if it isn't played, they share 1st. Three or more level teams: goals scored, then shared 1st. The old arbitrary team-order tie-break is gone. | run_decider |
-| NTF-027 | — | Founder decided 27 Nov: keep each season's history; plan to confirm | Season reset deletes sessions and matches today. Plan: keep them, tagged with their season; stats stay season-only, as they already are. Not built yet. | — |
+| NTF-027 | — | Confirmed and fixed (Founder decision 27 Nov) | The reset no longer deletes sessions, matches or club results; each is tagged with its season (additive migration, existing rows go into the current season). Every player's final record and the crowns are saved per season. Stats, club stats, head-to-head, session history and teammate counts read the current season. Session numbers restart at #1 each season. Profiles get a Season menu. The #session-history channel is still cleared at reset. | run_reset, run_season_profile |
 | NTF-028 | High | Confirmed and fixed | Now one reset per server at a time, and the automatic reset carries the season number so a stale one does nothing. Backup first. A reset and a queue turning into a session can't overlap (a reset could have deleted a session mid-build). The 24h warning is only marked sent once it posts. Remaining: the archive post isn't retried (the backup holds the standings), and there's no explicit policy if sessions run back-to-back at season end (it retries every 10 min). | run_season_safety |
 | NTF-029 | High | Confirmed and fixed | Backups use SQLite's online backup API and are integrity-checked, kept 30 per label, taken on every bot start (before `init_db` adds columns) and before every season reset. A daily systemd timer and restore steps are in `deploy/ORACLE.md`. The database already lives outside the repo, foreign keys are on and `*.db` is git-ignored. Remaining: backups sit on the same disk; copy one off now and then. | run_season_safety, migration check |
 | NTF-030 | Low | Incorrect audit finding (partly) | Deployment config exists: `deploy/` has the Oracle systemd unit and install script. Railway is no longer used. discord.py is now pinned below version 3. The Python version isn't pinned. | — |
@@ -76,7 +76,7 @@ Commits, oldest first: `846f8aa` tests in repo, `a98c74e` queue, `596056e` match
 
 ## Database migration
 
-One additive change: `ALTER TABLE matches ADD COLUMN went_to_pens INTEGER NOT NULL DEFAULT 0`, run by `init_db` on start, after an automatic backup. It was tested on a database in the old shape: existing rows are kept, the new column reads 0, and running it twice is harmless. The old code still works with the new column, so rolling back needs no database change.
+Additive changes only, run by `init_db` on start after an automatic backup: `matches.went_to_pens`; `season_number` on `sessions`, `match_participants` and `club_match_results`; `sessions.season_session_no`; new tables `season_records` and `season_crowns`. Existing rows are filled in as the current season (tested on a database with old rows: stats unchanged). It was tested on a database in the old shape: existing rows are kept, the new column reads 0, and running it twice is harmless. The old code still works with the new column, so rolling back needs no database change.
 
 ## Backup and rollback
 
@@ -117,7 +117,7 @@ One additive change: `ALTER TABLE matches ADD COLUMN went_to_pens INTEGER NOT NU
 
 ## Outstanding Founder decisions
 
-Decided 27 Nov: Match Live required (built), the Decider and the +15 rule (built), #session-history still wiped each reset, keep each season's history (plan to confirm), admins adjust hidden MMR with `/hidden_mmr_set` (no change), keep moving players who are in voice (no change).
+Decided 27 Nov: Match Live required (built), the Decider and the +15 rule (built), keep each season's history with a profile Season menu (built), #session-history still wiped each reset, admins adjust hidden MMR with `/hidden_mmr_set` (no change), keep moving players who are in voice (no change).
 
 6. **NTF-008:** full session restore after a restart (bigger), or safe clean-up on start (smaller, done first)?
 7. **Phase 9 proposals** (reliability stats, achievements, longer profiles, positions, an independent hidden rating): which to plan first?

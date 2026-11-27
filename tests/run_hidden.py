@@ -35,6 +35,8 @@ assert db.undo_match_result(mid) is not None
 a=db.get_player_mode_stats(G,1,"league"); b=db.get_player_mode_stats(G,2,"league")
 assert a["mmr"]==before["mmr"] and a["hidden_mmr"]==before["hidden_mmr"] and a["wins"]==0, a
 assert b["mmr"]==b2["mmr"] and b["hidden_mmr"]==b2["hidden_mmr"] and b["losses"]==0, b
-# a session left "active" by a restart is cleared by the season reset too
-assert db.reset_sessions(G)==1
+# a session left "active" by a restart is marked ended by the season reset (and kept)
+db.reset_sessions(G)
+with db.get_conn() as c:
+    assert c.execute("SELECT status FROM sessions WHERE id=?",(sid,)).fetchone()[0]=="ended"
 print("UNDO+STALE OK")

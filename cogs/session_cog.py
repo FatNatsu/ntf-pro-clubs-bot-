@@ -16,6 +16,12 @@ import leaderboard_utils
 import ui
 
 
+def _num(session_id) -> int:
+    """The session number people see: it counts from 1 again every season
+    (the database id keeps counting up underneath)."""
+    return db.session_number(session_id)
+
+
 def _ordinal(n: int) -> str:
     """7 -> '7th'. Used so messages follow the mode's team cap if it ever changes."""
     if 10 <= n % 100 <= 20:
@@ -1324,7 +1330,7 @@ class SessionCog(commands.Cog):
         # time (League 2, Rivals 1) - see the layout note in config.py.
         # Created one after another so they sit in this order in the server.
         num_slots = max(1, num_teams // 2)
-        prefix = f"{config.SESSION_CATEGORY_PREFIX} #{session_id}"
+        prefix = f"{config.SESSION_CATEGORY_PREFIX} #{_num(session_id)}"
         category = await voice_utils.create_named_category(
             guild, f"{prefix} · {config.BENCH_CATEGORY_LABEL} ({mode.upper()})"
         )
@@ -1561,7 +1567,7 @@ class SessionCog(commands.Cog):
 
         await self._log_action(
             session_id,
-            f"\n━━━━━━━━━━━━━━━━━━━━\n📋 **Session #{session_id} started** — {mode.title()} — "
+            f"\n━━━━━━━━━━━━━━━━━━━━\n📋 **Session #{_num(session_id)} started** — {mode.title()} — "
             f"Teams: {clubs_line}\n━━━━━━━━━━━━━━━━━━━━",
         )
         # the admin controls + live match status go right under that header line
@@ -1749,7 +1755,7 @@ class SessionCog(commands.Cog):
                         pass
         self._schedule_rename(
             guild, state, slot["category_id"],
-            f"{config.SESSION_CATEGORY_PREFIX} #{session_id} · {config.MATCH_CATEGORY_LABEL} {slot['n']} · {club_a} vs {club_b}"[:100],
+            f"{config.SESSION_CATEGORY_PREFIX} #{_num(session_id)} · {config.MATCH_CATEGORY_LABEL} {slot['n']} · {club_a} vs {club_b}"[:100],
         )
         await self._sync_captains_access(guild, state, slot)
 
@@ -1800,7 +1806,7 @@ class SessionCog(commands.Cog):
         round_no = state["current_round"]
         matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
         embed = discord.Embed(
-            title=f"Session #{session_id} — {state['mode'].title()} — Round {round_no}/{state['total_rounds']}",
+            title=f"Session #{_num(session_id)} — {state['mode'].title()} — Round {round_no}/{state['total_rounds']}",
             color=ui.accent("neutral"),
         )
         for n, match in enumerate(matches, start=1):
@@ -1827,7 +1833,7 @@ class SessionCog(commands.Cog):
             who = ended_by.mention if ended_by else "the system"
             how = f"Ended early by {who} in round {state['current_round']}/{state['total_rounds']}."
         embed = discord.Embed(
-            title=f"Session #{session_id} — {state['mode'].title()} — ended",
+            title=f"Session #{_num(session_id)} — {state['mode'].title()} — ended",
             description=how,
             color=discord.Color.dark_grey(),
         )
@@ -1846,7 +1852,7 @@ class SessionCog(commands.Cog):
         try:
             status_message = await channel.send(**ui.send_kwargs("admin", self._build_admin_status_embed(session_id)))
             view = AdminPanelView(self, session_id)
-            panel_message = await channel.send(f"🛠️ **Session #{session_id} — admin controls**", view=view)
+            panel_message = await channel.send(f"🛠️ **Session #{_num(session_id)} — admin controls**", view=view)
         except discord.HTTPException:
             return
         state["admin_status_message"] = status_message
@@ -2233,7 +2239,7 @@ class SessionCog(commands.Cog):
         club_b = state["teams"][match["team_b_id"]]["club_name"]
         winner, loser = (club_a, club_b) if a_won else (club_b, club_a)
         score = "on penalties" if went_to_pens else f"{max(score_a, score_b)}–{min(score_a, score_b)}"
-        details = [f"Session #{session_id}", f"Round {match['round_no']}", "League" if mode == "league" else "Rivals"]
+        details = [f"Session #{_num(session_id)}", f"Round {match['round_no']}", "League" if mode == "league" else "Rivals"]
         live_at = state.get("match_live_at", {}).get(match["id"])
         if live_at:
             details.append(f"⏱️ {max(1, round((time.time() - live_at) / 60))} min")
@@ -2422,7 +2428,7 @@ class SessionCog(commands.Cog):
             winning_captain = state["teams"][winning_team_id]["captain_id"]
             mode_label = "🏆 League" if state["mode"] == "league" else "⚔️ Rivals"
             history_embed = discord.Embed(
-                title=f"Session #{session_id} — Final Standings",
+                title=f"Session #{_num(session_id)} — Final Standings",
                 description="\n".join(lines),
                 color=ui.accent(state["mode"]),
             )
@@ -2432,9 +2438,9 @@ class SessionCog(commands.Cog):
             try:
                 await history_channel.send(
                     (
-                        f"**Session #{session_id}** — {mode_label} — **{winning_club}** shared 1st."
+                        f"**Session #{_num(session_id)}** — {mode_label} — **{winning_club}** shared 1st."
                         if len(winners) > 1 else
-                        f"**Session #{session_id}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
+                        f"**Session #{_num(session_id)}** — {mode_label} — **{winning_club}** won, captained by <@{winning_captain}>."
                     ),
                     **ui.send_kwargs("session_history", history_embed),
                 )
@@ -2822,7 +2828,7 @@ class SessionCog(commands.Cog):
                     history = guild.get_channel(cfg.get("history_channel_id") or 0)
                     if history:
                         await history.send(
-                            f"**Session #{session_id}** — the Decider wasn't played, so **{clubs}** shared 1st "
+                            f"**Session #{_num(session_id)}** — the Decider wasn't played, so **{clubs}** shared 1st "
                             f"(+{config.SESSION_WIN_BONUS_MMR} MMR each)."
                         )
             except Exception:
@@ -2933,11 +2939,11 @@ class SessionCog(commands.Cog):
         view = discord.ui.View(timeout=30)
         for sid in guild_sessions:
             club_list = ", ".join(t["club_name"] for t in self.active_sessions[sid]["teams"].values())
-            btn = discord.ui.Button(label=f"Session #{sid}: {club_list}"[:80], style=discord.ButtonStyle.danger)
+            btn = discord.ui.Button(label=f"Session #{_num(sid)}: {club_list}"[:80], style=discord.ButtonStyle.danger)
 
             async def make_cb(session_id=sid):
                 async def cb(inter: discord.Interaction):
-                    await inter.response.send_message(f"Ending session #{session_id}…", ephemeral=True)
+                    await inter.response.send_message(f"Ending session #{_num(session_id)}…", ephemeral=True)
                     await self.end_session(session_id, ended_by=inter.user)
                 return cb
 

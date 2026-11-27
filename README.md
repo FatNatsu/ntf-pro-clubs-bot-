@@ -191,8 +191,9 @@ can post this panel; any player can then ready up from it.
     seconds**, then every session category (Bench, each game's channels and
     team VCs) is torn down automatically. **#session-history** keeps the
     record for the season: the winner, the full final table and every score
-    (it is cleared, along with past sessions, at each season reset; the
-    season archive and the backups keep the end-of-season standings). The
+    (the channel is cleared at each season reset; the season's sessions and
+    results stay saved in the database, and its final records show in the
+    profile Season menu). The
     final standings and the +15 session bonus happen once, even when both
     League games finish at the same moment, and a result can't be undone
     after the final standings are in.
@@ -299,6 +300,15 @@ process without interfering with each other.
 - **Golden Crown:** at each reset, the player with the most wins in each
   mode (ties: fewer losses, then higher MMR) is named in the season archive
   and carries a 👑 on the leaderboard and in `/rank` for the next season.
+- **Each season keeps its own history.** The reset puts MMR and records back
+  to the start, but every session, match and club result stays saved under
+  its season, along with every player's final record and the Golden Crown
+  winners. Leaderboards, profiles, club stats, head-to-head and
+  `/session_history` show the current season. Session numbers start from #1
+  each season. The #session-history channel is still cleared at each reset.
+- **Profiles have a Season menu** once a player has an ended season: pick a
+  season to see that season's final rank, MMR, W-L, form, crown and
+  highlights (best club, teammates, rival).
 
 ## Hidden MMR (admins only)
 
