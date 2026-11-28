@@ -246,6 +246,7 @@ def init_db():
         # people see ("Session #3"), which starts from 1 every season.
         for table, column in (("sessions", "season_number INTEGER"), ("sessions", "season_session_no INTEGER"),
                               ("sessions", "category_ids TEXT"),
+                              ("guild_config", "end_vc_id INTEGER"),
                               ("match_participants", "season_number INTEGER"), ("club_match_results", "season_number INTEGER")):
             try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")

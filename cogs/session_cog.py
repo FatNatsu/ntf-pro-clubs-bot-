@@ -989,16 +989,19 @@ class SessionCog(commands.Cog):
             session_id = row["id"]
             number = row["season_session_no"] or session_id
             removed = 0
+            ours = []
             for category_id in row["category_ids"]:
                 category = guild.get_channel(category_id)
-                is_ours = (
+                if (
                     category is not None
                     and isinstance(category, discord.CategoryChannel)
                     and (category.name or "").startswith(f"{config.SESSION_CATEGORY_PREFIX} #")
-                )
-                if is_ours:
-                    await voice_utils.teardown_session_category(guild, category)
-                    removed += 1
+                ):
+                    ours.append(category)
+            await self._gather_in_end_vc(guild, ours)
+            for category in ours:
+                await voice_utils.teardown_session_category(guild, category)
+                removed += 1
             unmuted = 0
             for user_id in db.bot_mutes_for_session(session_id):
                 if await voice_utils.set_spectator_mute(guild, user_id, False):
@@ -2811,6 +2814,35 @@ class SessionCog(commands.Cog):
 
             return True, moved, reason
 
+    # -------------------------------------------------------------- end of session
+    async def _gather_in_end_vc(self, guild, categories) -> int:
+        """Before a session's calls are deleted, moves everyone still in them
+        (players, the Bench, spectators) into the voice channel an admin chose
+        with /end_vc, so nobody is just dropped out of voice (Founder, 28 Nov
+        2026). Does nothing if no channel is set or it's gone. Returns how
+        many were moved."""
+        cfg = db.get_guild_config(guild.id) or {}
+        target = guild.get_channel(cfg.get("end_vc_id") or 0)
+        category_ids = {c.id for c in categories if c is not None}
+        if target is None or getattr(target, "category_id", None) in category_ids:
+            return 0
+        people = {}
+        for category in categories:
+            if category is None:
+                continue
+            for channel in list(category.channels):
+                for member in list(getattr(channel, "members", []) or []):
+                    people[member.id] = member
+        if not people:
+            return 0
+        results = await asyncio.gather(
+            *(voice_utils.move_member_to_channel(guild, uid, target) for uid in people), return_exceptions=True
+        )
+        moved = sum(1 for r in results if isinstance(r, tuple) and r[0])
+        if moved < len(people):
+            logging.getLogger("ntf").warning("end-of-session move: %s of %s moved in guild %s", moved, len(people), guild.id)
+        return moved
+
     # -------------------------------------------------------------- voice access
     _ACCESS_KEYS = ("view_channel", "connect", "move_members")
 
@@ -2990,11 +3022,13 @@ class SessionCog(commands.Cog):
                     logging.getLogger("ntf").warning("session %s end announcement failed", session_id, exc_info=True)
 
         # Voice infrastructure disappears right away either way - that's the
-        # actual "ending" of the session. The permanent text channels get
+        # actual "ending" of the session. Everyone still in its calls is moved
+        # into the /end_vc channel first. The permanent text channels get
         # cleaned up separately below, with a grace period so people can
         # still read what happened before it disappears.
-        for category_id in state.get("category_ids") or [state["category_id"]]:
-            category = guild.get_channel(category_id)
+        categories = [guild.get_channel(c) for c in (state.get("category_ids") or [state["category_id"]])]
+        await self._gather_in_end_vc(guild, categories)
+        for category in categories:
             if category:
                 await voice_utils.teardown_session_category(guild, category)
 

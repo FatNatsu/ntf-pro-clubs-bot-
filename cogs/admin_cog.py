@@ -358,6 +358,25 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(name="end_vc", description="[Admin] Pick the voice channel everyone is moved into when a session ends")
+    @app_commands.describe(channel="Leave empty to stop moving people at the end")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def end_vc(self, interaction: discord.Interaction, channel: discord.VoiceChannel = None):
+        """When a session ends (finished or ended early), everyone still in its
+        calls is moved here before the calls are deleted (Founder, 28 Nov 2026)."""
+        if channel is None:
+            db.upsert_guild_config(interaction.guild_id, end_vc_id=None)
+            await interaction.response.send_message(
+                "Done — when a session ends, its calls just close (nobody is moved).", ephemeral=True
+            )
+            return
+        db.upsert_guild_config(interaction.guild_id, end_vc_id=channel.id)
+        await interaction.response.send_message(
+            f"Done — when a session ends, everyone still in its calls is moved to {channel.mention}. "
+            f"Make sure the bot can see that channel and has Move Members there.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="ntf_status", description="[Admin] Privately check the bot: sessions, queues, backups and recent errors")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def ntf_status(self, interaction: discord.Interaction):

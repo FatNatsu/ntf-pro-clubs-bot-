@@ -350,6 +350,11 @@ real server. Run it before every update to the live bot.
   the newest backup and the last errors. Important failures (a session that
   won't start, a failed backup or season archive, a restart mid-session)
   are also posted in the admin log.
+- `/end_vc channel:` (admins): when a session ends, finished or ended
+  early, everyone still in its calls (players, the Bench, spectators) is
+  moved into that voice channel before the calls are deleted. Run
+  `/end_vc` with no channel to turn it off. The bot needs Move Members in
+  that channel.
 - Voice access follows the roster: a transferred or removed player loses
   their old team's call, and a replaced captain goes back to normal player
   access. Admins and ghosts are never changed.
