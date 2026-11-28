@@ -1404,6 +1404,21 @@ class SessionCog(commands.Cog):
         session_id = db.create_session(guild.id, mode)
         # One category for the Bench, then one per game played at the same
         # time (League 2, Rivals 1) - see the layout note in config.py.
+        # Shown the moment the queue pops, so nobody stares at an empty
+        # channel while the calls are built. Edited into the "started"
+        # message once everything is ready.
+        started_at = time.monotonic()
+        setup_msg = None
+        announce_channel = guild.get_channel(announce_channel_id)
+        if announce_channel:
+            try:
+                setup_msg = await announce_channel.send(
+                    f"⏳ **Setting up NTF {mode.title()} Session #{_num(session_id)}** — {', '.join(club_names)}. "
+                    f"Jump into any voice channel now and you'll be moved to your team automatically."
+                )
+            except discord.HTTPException:
+                setup_msg = None
+
         # Created one after another so they sit in this order in the server.
         num_slots = max(1, num_teams // 2)
         prefix = f"{config.SESSION_CATEGORY_PREFIX} #{_num(session_id)}"
@@ -1446,14 +1461,25 @@ class SessionCog(commands.Cog):
         # The team voice channels start in the Bench category and are moved
         # under their game by _post_round (the same step that re-sorts them
         # when League opponents change each round).
-        slots = []
-        for n, slot_category in enumerate(slot_categories, start=1):
-            public_channel = await voice_utils.create_read_only_text_channel(
+        async def make_game_channels(n, slot_category):
+            # public first so it sits on top inside this game's category
+            public = await voice_utils.create_read_only_text_channel(
                 guild, slot_category, config.MATCH_PUBLIC_CHANNEL_NAME.format(n=n)
             )
-            captains_channel = await voice_utils.create_private_text_channel(
+            captains = await voice_utils.create_private_text_channel(
                 guild, slot_category, config.MATCH_CAPTAINS_CHANNEL_NAME.format(n=n)
             )
+            return public, captains
+
+        # both games' channels are built at the same time
+        game_channels = await asyncio.gather(
+            *(make_game_channels(n, c) for n, c in enumerate(slot_categories, start=1))
+        )
+        channels_done = time.monotonic()
+        slots = []
+        for (n, slot_category), (public_channel, captains_channel) in zip(
+            enumerate(slot_categories, start=1), game_channels
+        ):
             slots.append({
                 "n": n,
                 "category_id": slot_category.id,
@@ -1474,15 +1500,17 @@ class SessionCog(commands.Cog):
         # mobility. Applied fresh for every session regardless of whether a
         # given ghost is even playing in it - they're not part of the draft
         # pool and this never touches on_field/team rosters at all.
+        ghost_tasks = []
         for ghost in db.get_ghosts(guild.id):
             ghost_member = guild.get_member(ghost["discord_id"])
             if not ghost_member:
                 continue
             for channel in list(team_channels) + [bench_channel]:
-                try:
-                    await channel.set_permissions(ghost_member, view_channel=True, connect=True, move_members=True)
-                except discord.HTTPException:
-                    pass
+                ghost_tasks.append(channel.set_permissions(ghost_member, view_channel=True, connect=True, move_members=True))
+        if ghost_tasks:
+            for result in await asyncio.gather(*ghost_tasks, return_exceptions=True):
+                if isinstance(result, Exception):
+                    logging.getLogger("ntf").warning("ghost access failed in session %s: %s", session_id, result)
 
         teams_state = {}
         db_team_ids = []
@@ -1611,9 +1639,10 @@ class SessionCog(commands.Cog):
             )
         except discord.HTTPException:
             pass
+        moves_done = time.monotonic()
         await self._post_round(guild, session_id, 1)
+        panels_done = time.monotonic()
 
-        announce_channel = guild.get_channel(announce_channel_id)
         clubs_line = ", ".join(club_names)
         if announce_channel:
             extra_note = f" (Started {missing} short of a full queue — late arrivals can join the Bench and be subbed in.)" if missing else ""
@@ -1622,10 +1651,19 @@ class SessionCog(commands.Cog):
             # ends never deletes this running session's announcements (NTF-007)
             announced = session_state.setdefault("announce_message_ids", set())
             try:
-                started_msg = await announce_channel.send(
+                started_text = (
                     f"🟢 **NTF {mode.title()} session started!** Teams: {clubs_line}.{extra_note}{test_note} "
                     f"Captains — your controls are in your match's captains channel."
                 )
+                started_msg = None
+                if setup_msg is not None:
+                    try:
+                        await setup_msg.edit(content=started_text)
+                        started_msg = setup_msg
+                    except discord.HTTPException:
+                        started_msg = None
+                if started_msg is None:
+                    started_msg = await announce_channel.send(started_text)
                 announced.add(started_msg.id)
                 if failed_moves:
                     # Discord can only move someone who's already connected to a
@@ -1642,6 +1680,11 @@ class SessionCog(commands.Cog):
             except discord.HTTPException:
                 logging.getLogger("ntf").warning("session %s start announcement failed", session_id, exc_info=True)
 
+        logging.getLogger("ntf").info(
+            "session %s set up in %.1fs (channels %.1fs, moves %.1fs, captain panels %.1fs)",
+            session_id, time.monotonic() - started_at, channels_done - started_at,
+            moves_done - channels_done, panels_done - moves_done,
+        )
         await self._log_action(
             session_id,
             f"\n━━━━━━━━━━━━━━━━━━━━\n📋 **Session #{_num(session_id)} started** — {mode.title()} — "
@@ -2134,10 +2177,13 @@ class SessionCog(commands.Cog):
         state = self.active_sessions[session_id]
         matches = [m for m in db.get_matches_for_session(session_id) if m["round_no"] == round_no]
         slots = state["slots"]
-        for n, match in enumerate(matches, start=1):
-            # this round's n-th fixture is played in the n-th game category
-            slot = slots[min(n, len(slots)) - 1]
-            await self._assign_slot(guild, session_id, slot, match, round_no, n, len(matches))
+        # this round's n-th fixture is played in the n-th game category; the
+        # games are set up at the same time (each game's own messages still
+        # go in order inside its captains channel)
+        await asyncio.gather(*(
+            self._assign_slot(guild, session_id, slots[min(n, len(slots)) - 1], match, round_no, n, len(matches))
+            for n, match in enumerate(matches, start=1)
+        ))
         await self._refresh_status(session_id)
 
     async def finalize_match(self, interaction, match_id, winner_team_id, loser_team_id,
